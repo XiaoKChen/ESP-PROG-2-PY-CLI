@@ -1,0 +1,13 @@
+# pyOCD configuration for the ESP-Prog-2 -> Renesas RA4M1 (UNO R4 Minima) setup.
+#
+# With this file in the working directory you can run bare pyocd commands
+# (no -t flag needed), e.g. from the project root:
+#
+#   pyocd list
+#   pyocd flash hex/dfu_minima.hex
+#   pyocd reset
+#
+# The Python TUI/CLI in this project applies the same options programmatically.
+
+target_override: r7fa4m1ab   # RA4M1 / R7FA4M1AB, 256 KB code flash @ 0x00000000
+frequency: 1000000           # SWD clock, 1 MHz
