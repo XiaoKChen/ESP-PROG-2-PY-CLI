@@ -8,3 +8,31 @@ wheels/
 
 # Virtual environments
 .venv
+
+# --- Template alignment (added by /refactor-template) ---
+
+# Python-generated files (*.py[cod] also covers .pyd, which *.py[oc] above does not)
+*.py[cod]
+
+# Tool caches — regenerated on every run
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# IDE per-machine state
+.vscode/launch.json
+.idea/
+
+# Claude Code per-developer state
+.claude/settings.local.json
+.claude/memory/
+
+# Secrets & local env
+.env
+.env.*
+
+# OS junk
+.DS_Store
+Thumbs.db

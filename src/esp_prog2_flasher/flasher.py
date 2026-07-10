@@ -14,10 +14,20 @@ flashing the RA4M1 must go through pyOCD, not OpenOCD.
 
 from __future__ import annotations
 
+import contextlib
+import logging
+import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    from pyocd.core.session import Session
+    from pyocd.probe.debug_probe import DebugProbe
+
+logger = logging.getLogger(__name__)
 
 # The ESP-Prog-2 enumerates as a CMSIS-DAP device on Espressif's USB vendor ID.
 ESP_PROG_VID = 0x303A
@@ -25,28 +35,59 @@ ESP_PROG_PID = 0x1002
 # Renesas RA4M1 (Arduino UNO R4 Minima MCU) — pyOCD pack target name.
 TARGET_TYPE = "r7fa4m1ab"
 DEFAULT_FREQUENCY_HZ = 1_000_000
+DEFAULT_BAUD_RATE: Final[int] = 921600
+# Hidden dispatch flag: when a frozen (PyInstaller) build re-execs itself to run
+# esptool, cli.py intercepts this as argv[1] and calls esptool.main() in-process
+# instead of parsing it as a normal CLI flag. See flash_probe().
+ESPTOOL_SHIM_FLAG: Final[str] = "--esptool-shim"
 
 _HEX_NAME = "dfu_minima.hex"
 # A blank Cortex-M reads this in PC after reset (vector table = 0xFFFFFFFF).
 _BLANK_PC = 0xFFFFFFFE
+_PC_ADDRESS_MASK: Final[int] = 0xFFFFFFFE
+_DOWNLOAD_TIMEOUT_S: Final[int] = 60
 
 ProgressCallback = Callable[[float], None]
 LogCallback = Callable[[str], None]
 
 
-def find_default_hex() -> Optional[Path]:
-    """Locate the bundled ``hex/dfu_minima.hex`` regardless of how we were launched."""
+class FlasherError(Exception):
+    """Base error for this module — callers catch this, not Exception."""
+
+
+class ProbeNotFoundError(FlasherError):
+    """Raised when no ESP-Prog-2 / CMSIS-DAP probe is connected."""
+
+
+class FlashFailedError(FlasherError):
+    """Raised when programming the target or the probe's own firmware fails."""
+
+
+def _find_bundled(*parts: str) -> Path | None:
+    """Locate a data file, checking a PyInstaller onefile bundle before falling
+    back to searching upward from the package/CWD (source and installed-package runs).
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if getattr(sys, "frozen", False) and meipass:
+        candidate = Path(meipass, *parts)
+        if candidate.is_file():
+            return candidate
+
     seen: set[Path] = set()
-    bases = [Path(__file__).resolve(), Path.cwd().resolve()]
-    for base in bases:
+    for base in (Path(__file__).resolve(), Path.cwd().resolve()):
         for parent in [base, *base.parents]:
-            candidate = parent / "hex" / _HEX_NAME
+            candidate = parent.joinpath(*parts)
             if candidate in seen:
                 continue
             seen.add(candidate)
             if candidate.is_file():
                 return candidate
     return None
+
+
+def find_default_hex() -> Path | None:
+    """Locate the bundled ``hex/dfu_minima.hex`` regardless of how we were launched."""
+    return _find_bundled("hex", _HEX_NAME)
 
 
 @dataclass(frozen=True)
@@ -75,14 +116,14 @@ class TargetState(Enum):
 class DetectResult:
     state: TargetState
     detail: str
-    probe: Optional[ProbeInfo] = None
+    probe: ProbeInfo | None = None
 
     @property
     def flashable(self) -> bool:
         return self.state in (TargetState.CONNECTED, TargetState.CONNECTED_BLANK)
 
 
-def _is_esp_prog(probe) -> bool:
+def _is_esp_prog(probe: DebugProbe) -> bool:
     text = " ".join(
         filter(
             None,
@@ -96,7 +137,7 @@ def _is_esp_prog(probe) -> bool:
     return "espressif" in text or "esp-prog" in text or "esp prog" in text
 
 
-def _to_info(probe) -> ProbeInfo:
+def _to_info(probe: DebugProbe) -> ProbeInfo:
     return ProbeInfo(
         unique_id=probe.unique_id or "",
         product_name=getattr(probe, "product_name", "") or "",
@@ -106,7 +147,7 @@ def _to_info(probe) -> ProbeInfo:
     )
 
 
-def _raw_probes(unique_id: Optional[str] = None) -> list:
+def _raw_probes(unique_id: str | None = None) -> list[DebugProbe]:
     # Imported lazily so module import never blocks on USB enumeration.
     from pyocd.core.helpers import ConnectHelper
 
@@ -115,7 +156,7 @@ def _raw_probes(unique_id: Optional[str] = None) -> list:
     )
 
 
-def _choose_raw(unique_id: Optional[str] = None):
+def _choose_raw(unique_id: str | None = None) -> DebugProbe | None:
     probes = _raw_probes(unique_id)
     if not probes:
         return None
@@ -126,17 +167,17 @@ def _choose_raw(unique_id: Optional[str] = None):
     return probes[0]
 
 
-def list_probes() -> List[ProbeInfo]:
+def list_probes() -> list[ProbeInfo]:
     """Return every connected debug probe, flagging which look like an ESP-Prog-2."""
     return [_to_info(p) for p in _raw_probes()]
 
 
-def find_esp_prog() -> Optional[ProbeInfo]:
+def find_esp_prog() -> ProbeInfo | None:
     probe = _choose_raw()
     return _to_info(probe) if probe is not None else None
 
 
-def _open_session(probe, frequency: int):
+def _open_session(probe: DebugProbe, frequency: int) -> Session:
     from pyocd.core.session import Session
 
     return Session(
@@ -145,7 +186,7 @@ def _open_session(probe, frequency: int):
     )
 
 
-def detect(unique_id: Optional[str] = None, frequency: int = DEFAULT_FREQUENCY_HZ) -> DetectResult:
+def detect(unique_id: str | None = None, frequency: int = DEFAULT_FREQUENCY_HZ) -> DetectResult:
     """Detect the ESP-Prog-2 and whether an RA4M1 target is reachable through it."""
     probe = _choose_raw(unique_id)
     if probe is None:
@@ -159,7 +200,7 @@ def detect(unique_id: Optional[str] = None, frequency: int = DEFAULT_FREQUENCY_H
         try:
             target.halt()
             pc = target.read_core_register("pc")
-            blank = (pc & 0xFFFFFFFE) == (_BLANK_PC & 0xFFFFFFFE)
+            blank = (pc & _PC_ADDRESS_MASK) == (_BLANK_PC & _PC_ADDRESS_MASK)
             if blank:
                 return DetectResult(
                     TargetState.CONNECTED_BLANK,
@@ -174,7 +215,10 @@ def detect(unique_id: Optional[str] = None, frequency: int = DEFAULT_FREQUENCY_H
             )
         except Exception:
             # Core examined but could not be halted/read — still present and flashable.
-            return DetectResult(TargetState.CONNECTED, f"RA4M1 connected via {info.unique_id}.", info)
+            logger.debug("core halt/read failed for %s", info.unique_id, exc_info=True)
+            return DetectResult(
+                TargetState.CONNECTED, f"RA4M1 connected via {info.unique_id}.", info
+            )
     except Exception as exc:  # noqa: BLE001 — surface any link/examine failure as "no target"
         return DetectResult(
             TargetState.NO_TARGET,
@@ -186,15 +230,15 @@ def detect(unique_id: Optional[str] = None, frequency: int = DEFAULT_FREQUENCY_H
         try:
             session.close()
         except Exception:
-            pass
+            logger.debug("session close failed for %s", info.unique_id, exc_info=True)
 
 
 def flash(
     hex_path: Path,
-    unique_id: Optional[str] = None,
+    unique_id: str | None = None,
     frequency: int = DEFAULT_FREQUENCY_HZ,
-    progress: Optional[ProgressCallback] = None,
-    log: Optional[LogCallback] = None,
+    progress: ProgressCallback | None = None,
+    log: LogCallback | None = None,
 ) -> None:
     """Program ``hex_path`` to the RA4M1 target and reset it. Raises on failure."""
     from pyocd.flash.file_programmer import FileProgrammer
@@ -209,7 +253,7 @@ def flash(
 
     probe = _choose_raw(unique_id)
     if probe is None:
-        raise RuntimeError("No ESP-Prog-2 / CMSIS-DAP probe connected.")
+        raise ProbeNotFoundError("No ESP-Prog-2 / CMSIS-DAP probe connected.")
 
     _log(f"Opening {TARGET_TYPE} via {probe.unique_id} @ {frequency // 1000} kHz")
     session = _open_session(probe, frequency)
@@ -225,7 +269,7 @@ def flash(
         try:
             session.close()
         except Exception:
-            pass
+            logger.debug("session close failed for %s", probe.unique_id, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -256,21 +300,12 @@ class ProbeSerial:
         return self.pid != ESP_PROG_PID
 
 
-def find_probe_firmware() -> Optional[Path]:
+def find_probe_firmware() -> Path | None:
     """Locate the bundled firmware/esp-prog2.bin regardless of launch directory."""
-    seen: set[Path] = set()
-    for base in (Path(__file__).resolve(), Path.cwd().resolve()):
-        for parent in [base, *base.parents]:
-            candidate = parent / "firmware" / _PROBE_BIN_NAME
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            if candidate.is_file():
-                return candidate
-    return None
+    return _find_bundled("firmware", _PROBE_BIN_NAME)
 
 
-def find_probe_serial() -> Optional[ProbeSerial]:
+def find_probe_serial() -> ProbeSerial | None:
     """Find the ESP-Prog-2's serial port; prefer a ROM-download-mode port if present."""
     from serial.tools import list_ports
 
@@ -282,7 +317,7 @@ def find_probe_serial() -> Optional[ProbeSerial]:
     return ProbeSerial(chosen.device, chosen.pid or 0)
 
 
-def download_probe_firmware(dest: Optional[Path] = None, log: Optional[LogCallback] = None) -> Path:
+def download_probe_firmware(dest: Path | None = None, log: LogCallback | None = None) -> Path:
     """Download Espressif's OFFICIAL esp-prog2.bin (JTAG build) for reference.
 
     Saved as ``esp-prog2-official-jtag.bin`` so it never overwrites the bundled
@@ -299,7 +334,7 @@ def download_probe_firmware(dest: Optional[Path] = None, log: Optional[LogCallba
 
         truststore.inject_into_ssl()
     except Exception:
-        pass
+        logger.debug("truststore injection failed, using default SSL context", exc_info=True)
 
     if dest is None:
         bundled = find_probe_firmware()
@@ -310,10 +345,10 @@ def download_probe_firmware(dest: Optional[Path] = None, log: Optional[LogCallba
     dest.parent.mkdir(parents=True, exist_ok=True)
     if log:
         log(f"Downloading {PROBE_FIRMWARE_URL}")
-    with urllib.request.urlopen(PROBE_FIRMWARE_URL, timeout=60) as resp:
+    with urllib.request.urlopen(PROBE_FIRMWARE_URL, timeout=_DOWNLOAD_TIMEOUT_S) as resp:
         data = resp.read()
     if not data[:1] == b"\xe9":
-        raise RuntimeError("Downloaded file is not an ESP image (missing 0xE9 magic).")
+        raise FlashFailedError("Downloaded file is not an ESP image (missing 0xE9 magic).")
     dest.write_bytes(data)
     if log:
         log(f"Saved {len(data)} bytes to {dest}")
@@ -322,10 +357,10 @@ def download_probe_firmware(dest: Optional[Path] = None, log: Optional[LogCallba
 
 def flash_probe(
     bin_path: Path,
-    port: Optional[str] = None,
-    baud: int = 921600,
-    progress: Optional[ProgressCallback] = None,
-    log: Optional[LogCallback] = None,
+    port: str | None = None,
+    baud: int = DEFAULT_BAUD_RATE,
+    progress: ProgressCallback | None = None,
+    log: LogCallback | None = None,
 ) -> None:
     """Flash the ESP-Prog-2's own firmware (ESP32-S3) with esptool. Raises on failure.
 
@@ -334,13 +369,17 @@ def flash_probe(
     """
     import re
     import subprocess
-    import sys
 
     bin_path = Path(bin_path)
     if not bin_path.is_file():
         raise FileNotFoundError(f"Firmware file not found: {bin_path}")
 
-    args = [sys.executable, "-m", "esptool", "--chip", PROBE_CHIP]
+    if getattr(sys, "frozen", False):
+        # No "esptool" script on PATH and sys.executable is this bundle itself —
+        # re-exec it with a hidden flag that cli.py dispatches to esptool.main().
+        args = [sys.executable, ESPTOOL_SHIM_FLAG, "--chip", PROBE_CHIP]
+    else:
+        args = [sys.executable, "-m", "esptool", "--chip", PROBE_CHIP]
     if port:
         args += ["--port", port]
     args += ["--baud", str(baud), "write-flash", PROBE_FLASH_OFFSET, str(bin_path)]
@@ -348,7 +387,9 @@ def flash_probe(
     if log:
         log("esptool " + " ".join(args[3:]))
     percent = re.compile(r"\((\d+)\s*%\)")
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    proc = subprocess.Popen(
+        args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+    )
     assert proc.stdout is not None
     for line in proc.stdout:
         line = line.rstrip()
@@ -356,12 +397,10 @@ def flash_probe(
             log(line)
         match = percent.search(line)
         if match and progress:
-            try:
+            with contextlib.suppress(ValueError):
                 progress(float(match.group(1)))
-            except ValueError:
-                pass
     if proc.wait() != 0:
-        raise RuntimeError(
+        raise FlashFailedError(
             f"esptool exited with code {proc.returncode}. "
             "Is the ESP-Prog-2 in download mode (hold BOOT, tap RESET)?"
         )

@@ -18,3 +18,37 @@ esp-prog2-flasher = "esp_prog2_flasher.cli:main"
 [build-system]
 requires = ["uv_build>=0.11.2,<0.12.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.2.0",
+    "pyinstaller>=6.21.0",
+    "pytest>=9.1.1",
+    "ruff>=0.15.21",
+]
+
+# -----------------------------------------------------------------------------
+# Tooling
+# -----------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort — stdlib / third-party / local grouping
+    "B",        # bugbear — mutable defaults, etc.
+    "UP",       # pyupgrade
+    "SIM",      # simplify
+]
+
+[tool.mypy]
+strict = true
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -15,6 +15,15 @@ build** (SWD/CMSIS-DAP interface + mass storage disabled). The stock launchpad i
 JTAG-mode with an MSC drive and does **not** work with pyOCD; see
 [`firmware/README.md`](firmware/README.md) for the why and the rebuild recipe.
 
+## Setup
+
+Requires [uv](https://docs.astral.sh/uv/). Everything runs through it — no
+manual venv or pip.
+
+```sh
+uv sync          # create .venv from uv.lock
+```
+
 ## Run it
 
 ```sh
@@ -35,9 +44,11 @@ uv run esp-prog2-flasher --flash --hex path/to/other.hex
 
 uv run esp-prog2-flasher --flash-probe       # flash the bundled SWD firmware (needs download mode)
 uv run esp-prog2-flasher --flash-probe --port COM110
+uv run esp-prog2-flasher --flash-probe --probe-bin path/to/other.bin
 uv run esp-prog2-flasher --update-probe-fw   # fetch official JTAG image as esp-prog2-official-jtag.bin (reference)
 ```
 
+`--freq <hz>` overrides the SWD clock for target flashing (default 1 MHz).
 `--detect` exit codes: `0` target/probe OK, `2` no probe found.
 
 ## What it does
@@ -67,6 +78,8 @@ ESP-PROG-2-PY-CLI/
 ├── hex/             # bundled dfu_minima.hex (RA4M1 bootloader); override with --hex
 ├── firmware/        # bundled esp-prog2.bin (ESP-Prog-2's own firmware) + README
 ├── tools/           # pyOCD config + notes on flashing prerequisites
+├── scripts/         # build.ps1 / build.sh — PyInstaller one-file build
+├── esp-prog2-flasher.spec   # PyInstaller spec (bundles hex/ + firmware/)
 └── pyproject.toml
 ```
 
@@ -82,3 +95,45 @@ ESP-PROG-2-PY-CLI/
   that, the probe enumerates but pyOCD reports "no probe."
 - If `--detect` says the target type is unknown, install the device pack once:
   `uv run pyocd pack install r7fa4m1ab`.
+
+## Development
+
+```sh
+uv run ruff check src/      # lint
+uv run ruff format src/     # format
+uv run pytest               # tests (tests/)
+uv run mypy src/            # type check (strict)
+uv add <pkg>                # add a dependency (--dev for tooling)
+```
+
+Python version: pinned in `.python-version` / `pyproject.toml`.
+
+### Standalone binary
+
+A one-file executable (no Python install required to run it) can be built with
+PyInstaller:
+
+```sh
+uv run pyinstaller esp-prog2-flasher.spec --noconfirm   # or scripts/build.ps1 / scripts/build.sh
+```
+
+Produces `dist/esp-prog2-flasher.exe` (Windows) or `dist/esp-prog2-flasher`
+(macOS/Linux). The bundled `hex/` and `firmware/` files are packed into the
+binary. GitHub Actions (`.github/workflows/build.yml`) builds all three
+platforms on every push and attaches them to the GitHub release on `v*` tags.
+
+Note: flashing the RA4M1 target for the first time still requires pyOCD's
+`r7fa4m1ab` device pack, which pyOCD installs into the user's home directory
+(`~/.pyocd`) at runtime, not into the bundle. Run `uv run pyocd pack install
+r7fa4m1ab` once (from any pyOCD install, not necessarily this project's venv)
+before the first target flash on a machine.
+
+## Dependencies
+
+All declared in `pyproject.toml`, resolved by uv:
+
+- **pyocd** — SWD/CMSIS-DAP flashing of the RA4M1 target through the probe.
+- **esptool** — reflashing the ESP-Prog-2's own ESP32-S3 firmware.
+- **pyserial** — serial-port enumeration for probe auto-detection.
+- **textual** — the interactive TUI.
+- **truststore** — system CA trust for the official-firmware download.

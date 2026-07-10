@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Optional
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -12,6 +12,8 @@ from textual.widgets import Button, Footer, Header, Input, Label, ProgressBar, R
 
 from . import flasher
 from .flasher import DetectResult, TargetState
+
+logger = logging.getLogger(__name__)
 
 
 class FlasherApp(App):
@@ -42,10 +44,10 @@ class FlasherApp(App):
         ("q", "quit", "Quit"),
     ]
 
-    def __init__(self, hex_path: Optional[Path] = None, frequency: int = flasher.DEFAULT_FREQUENCY_HZ):
+    def __init__(self, hex_path: Path | None = None, frequency: int = flasher.DEFAULT_FREQUENCY_HZ):
         super().__init__()
         self._frequency = frequency
-        self._detect: Optional[DetectResult] = None
+        self._detect: DetectResult | None = None
         default = hex_path or flasher.find_default_hex()
         self._default_hex = str(default) if default else ""
 
@@ -75,8 +77,10 @@ class FlasherApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        self._log(f"Target: [b]{flasher.TARGET_TYPE}[/b] via pyOCD  •  "
-                  f"Probe fw: [b]{flasher.PROBE_CHIP}[/b] via esptool")
+        self._log(
+            f"Target: [b]{flasher.TARGET_TYPE}[/b] via pyOCD  •  "
+            f"Probe fw: [b]{flasher.PROBE_CHIP}[/b] via esptool"
+        )
         self._refresh_fw_status()
         self.action_detect()
 
@@ -109,12 +113,16 @@ class FlasherApp(App):
             return
         serial = flasher.find_probe_serial()
         if serial is None:
-            self._log("[yellow]No ESP-Prog-2 serial port found. Plug it in and enter "
-                      "download mode (hold BOOT, tap RESET).[/yellow]")
+            self._log(
+                "[yellow]No ESP-Prog-2 serial port found. Plug it in and enter "
+                "download mode (hold BOOT, tap RESET).[/yellow]"
+            )
             return
         if not serial.in_download_mode:
-            self._log(f"[yellow]{serial.device} looks like the running bridge (not download "
-                      f"mode). If flashing fails, hold BOOT + tap RESET, then retry.[/yellow]")
+            self._log(
+                f"[yellow]{serial.device} looks like the running bridge (not download "
+                f"mode). If flashing fails, hold BOOT + tap RESET, then retry.[/yellow]"
+            )
         self._busy(True)
         self._set_progress(0)
         self._log(f"[b]Flashing ESP-Prog-2[/b] {fw.name} via {serial.device} …")
@@ -122,8 +130,10 @@ class FlasherApp(App):
 
     def action_update_fw(self) -> None:
         self._busy(True)
-        self._log("[b]Downloading the OFFICIAL esp-prog2.bin (JTAG build)[/b] — saved separately as "
-                  "esp-prog2-official-jtag.bin; it will NOT replace the bundled SWD build.")
+        self._log(
+            "[b]Downloading the OFFICIAL esp-prog2.bin (JTAG build)[/b] — saved separately as "
+            "esp-prog2-official-jtag.bin; it will NOT replace the bundled SWD build."
+        )
         self.download_fw_worker()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -144,6 +154,7 @@ class FlasherApp(App):
         try:
             result = flasher.detect(frequency=self._frequency)
         except Exception as exc:  # noqa: BLE001
+            logger.exception("Detection worker failed")
             result = DetectResult(TargetState.NO_PROBE, f"Detection error: {exc!r}")
         self.call_from_thread(self._apply_detect, result)
 
@@ -158,6 +169,7 @@ class FlasherApp(App):
             )
             self.call_from_thread(self._flash_done, True, "Target flashed and reset.")
         except Exception as exc:  # noqa: BLE001
+            logger.exception("Flash target worker failed")
             self.call_from_thread(self._flash_done, False, f"Target flash failed: {exc!r}")
 
     @work(thread=True, exclusive=True, group="flash")
@@ -171,14 +183,18 @@ class FlasherApp(App):
             )
             self.call_from_thread(self._flash_done, True, "ESP-Prog-2 firmware flashed.")
         except Exception as exc:  # noqa: BLE001
+            logger.exception("Flash probe worker failed")
             self.call_from_thread(self._flash_done, False, f"ESP-Prog-2 flash failed: {exc!r}")
 
     @work(thread=True, exclusive=True, group="flash")
     def download_fw_worker(self) -> None:
         try:
-            dest = flasher.download_probe_firmware(log=lambda m: self.call_from_thread(self._log, m))
+            dest = flasher.download_probe_firmware(
+                log=lambda m: self.call_from_thread(self._log, m)
+            )
             self.call_from_thread(self._download_done, True, f"Saved {dest}")
         except Exception as exc:  # noqa: BLE001
+            logger.exception("Download firmware worker failed")
             self.call_from_thread(self._download_done, False, f"Download failed: {exc!r}")
 
     # ----- UI updates (main thread) -----------------------------------------
@@ -218,8 +234,9 @@ class FlasherApp(App):
             widget.update(f"Serial: [b]{serial.device}[/b] (download mode, pid 0x{serial.pid:04X})")
         else:
             widget.set_classes("warn")
-            widget.update(f"Serial: [b]{serial.device}[/b] (bridge running — hold BOOT + "
-                          f"tap RESET to flash)")
+            widget.update(
+                f"Serial: [b]{serial.device}[/b] (bridge running — hold BOOT + tap RESET to flash)"
+            )
 
     def _refresh_fw_status(self) -> None:
         fw = flasher.find_probe_firmware()
@@ -259,5 +276,5 @@ class FlasherApp(App):
         self.query_one("#log", RichLog).write(message)
 
 
-def run(hex_path: Optional[Path] = None, frequency: int = flasher.DEFAULT_FREQUENCY_HZ) -> None:
+def run(hex_path: Path | None = None, frequency: int = flasher.DEFAULT_FREQUENCY_HZ) -> None:
     FlasherApp(hex_path=hex_path, frequency=frequency).run()

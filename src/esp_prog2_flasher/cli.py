@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
 from . import flasher
 from .flasher import TargetState
+
+logger = logging.getLogger(__name__)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -16,26 +19,60 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Flash the RA4M1 bootloader through an ESP-Prog-2 (CMSIS-DAP), or reflash "
         "the ESP-Prog-2's own firmware. With no options, launches the interactive TUI.",
     )
-    p.add_argument("--list", action="store_true", help="List connected probes and serial ports, then exit.")
-    p.add_argument("--detect", action="store_true", help="Detect probe + RA4M1 target, print status, exit.")
-    p.add_argument("--flash", action="store_true", help="Flash the RA4M1 bootloader headlessly, then exit.")
-    p.add_argument("--flash-probe", action="store_true",
-                   help="Flash the ESP-Prog-2's own firmware (esp-prog2.bin) via esptool, then exit. "
-                        "Put the board in download mode first (hold BOOT, tap RESET).")
-    p.add_argument("--update-probe-fw", action="store_true",
-                   help="Download Espressif's OFFICIAL (JTAG) esp-prog2.bin for reference, saved as "
-                        "esp-prog2-official-jtag.bin (does NOT replace the bundled SWD build), then exit.")
-    p.add_argument("--hex", type=Path, default=None,
-                   help="Path to the RA4M1 .hex (default: bundled hex/dfu_minima.hex).")
-    p.add_argument("--probe-bin", type=Path, default=None,
-                   help="Path to the ESP-Prog-2 firmware (default: bundled firmware/esp-prog2.bin).")
-    p.add_argument("--port", default=None, help="Serial port for --flash-probe (default: auto-detect).")
-    p.add_argument("--freq", type=int, default=flasher.DEFAULT_FREQUENCY_HZ,
-                   help=f"SWD clock in Hz for target flashing (default: {flasher.DEFAULT_FREQUENCY_HZ}).")
+    p.add_argument(
+        "--list", action="store_true", help="List connected probes and serial ports, then exit."
+    )
+    p.add_argument(
+        "--detect", action="store_true", help="Detect probe + RA4M1 target, print status, exit."
+    )
+    p.add_argument(
+        "--flash", action="store_true", help="Flash the RA4M1 bootloader headlessly, then exit."
+    )
+    p.add_argument(
+        "--flash-probe",
+        action="store_true",
+        help="Flash the ESP-Prog-2's own firmware (esp-prog2.bin) via esptool, then exit. "
+        "Put the board in download mode first (hold BOOT, tap RESET).",
+    )
+    p.add_argument(
+        "--update-probe-fw",
+        action="store_true",
+        help="Download Espressif's OFFICIAL (JTAG) esp-prog2.bin for reference, saved as "
+        "esp-prog2-official-jtag.bin (does NOT replace the bundled SWD build), then exit.",
+    )
+    p.add_argument(
+        "--hex",
+        type=Path,
+        default=None,
+        help="Path to the RA4M1 .hex (default: bundled hex/dfu_minima.hex).",
+    )
+    p.add_argument(
+        "--probe-bin",
+        type=Path,
+        default=None,
+        help="Path to the ESP-Prog-2 firmware (default: bundled firmware/esp-prog2.bin).",
+    )
+    p.add_argument(
+        "--port", default=None, help="Serial port for --flash-probe (default: auto-detect)."
+    )
+    p.add_argument(
+        "--freq",
+        type=int,
+        default=flasher.DEFAULT_FREQUENCY_HZ,
+        help=f"SWD clock in Hz for target flashing (default: {flasher.DEFAULT_FREQUENCY_HZ}).",
+    )
     return p
 
 
 def main() -> None:
+    # Hidden dispatch for frozen builds: flash_probe() re-execs this bundle with
+    # this flag instead of "python -m esptool" (no such script exists when frozen).
+    if len(sys.argv) > 1 and sys.argv[1] == flasher.ESPTOOL_SHIM_FLAG:
+        import esptool
+
+        esptool.main(sys.argv[2:])
+        return
+
     args = _build_parser().parse_args()
 
     if args.list:
@@ -64,6 +101,7 @@ def main() -> None:
             dest = flasher.download_probe_firmware(args.probe_bin, log=print)
             print(f"Saved: {dest}")
         except Exception as exc:  # noqa: BLE001
+            logger.exception("Probe firmware download failed")
             print(f"Download failed: {exc}", file=sys.stderr)
             sys.exit(1)
         return
@@ -73,10 +111,13 @@ def main() -> None:
         if fw is None:
             print("No esp-prog2.bin found. Run --update-probe-fw first.", file=sys.stderr)
             sys.exit(2)
-        port = args.port or (flasher.find_probe_serial().device if flasher.find_probe_serial() else None)
+        port = args.port or (
+            flasher.find_probe_serial().device if flasher.find_probe_serial() else None
+        )
         try:
             flasher.flash_probe(fw, port=port, log=print)
         except Exception as exc:  # noqa: BLE001
+            logger.exception("ESP-Prog-2 flash failed")
             print(f"ESP-Prog-2 flash failed: {exc}", file=sys.stderr)
             sys.exit(1)
         return
@@ -89,6 +130,7 @@ def main() -> None:
         try:
             flasher.flash(hex_path, frequency=args.freq, log=print)
         except Exception as exc:  # noqa: BLE001
+            logger.exception("Target flash failed")
             print(f"Flash failed: {exc}", file=sys.stderr)
             sys.exit(1)
         return
