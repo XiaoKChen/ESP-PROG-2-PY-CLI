@@ -15,6 +15,33 @@ build** (SWD/CMSIS-DAP interface + mass storage disabled). The stock launchpad i
 JTAG-mode with an MSC drive and does **not** work with pyOCD; see
 [`firmware/README.md`](firmware/README.md) for the why and the rebuild recipe.
 
+## Install (prebuilt binary)
+
+Standalone binaries for Windows/macOS/Linux are attached to every
+[GitHub release](https://github.com/XiaoKChen/ESP-PROG-2-PY-CLI/releases).
+The repo is currently **private**, so the installers download through the
+[GitHub CLI](https://cli.github.com/) — run `gh auth login` once first.
+From a clone of this repo:
+
+```sh
+scripts/install.sh        # macOS / Linux → ~/.local/bin/esp-prog2-flasher
+```
+
+```powershell
+.\scripts\install.ps1     # Windows → %LOCALAPPDATA%\Programs\esp-prog2-flasher (added to user PATH)
+```
+
+Both take an optional version (e.g. `scripts/install.sh v0.2.0`,
+`.\scripts\install.ps1 -Version v0.2.0`); the default is the latest release.
+Or skip the scripts and grab an asset directly:
+
+```sh
+gh release download --repo XiaoKChen/ESP-PROG-2-PY-CLI --pattern esp-prog2-flasher-linux   # or -macos / -windows.exe
+```
+
+> If the repo goes public, the scripts fall back to plain
+> `curl`/`Invoke-WebRequest` against the release URLs — no `gh` needed.
+
 ## Setup
 
 Requires [uv](https://docs.astral.sh/uv/). Everything runs through it — no
