@@ -1,0 +1,4 @@
+# Shell scripts must stay LF — bash rejects CRLF (\r: command not found).
+*.sh text eol=lf
+# PowerShell is happy either way; keep native Windows endings.
+*.ps1 text eol=crlf
