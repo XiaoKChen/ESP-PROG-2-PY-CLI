@@ -54,10 +54,14 @@ jobs:
         with:
           path: artifacts
 
+      - name: Rename binaries per platform
+        run: |
+          mkdir release-assets
+          mv artifacts/esp-prog2-flasher-windows/esp-prog2-flasher.exe release-assets/esp-prog2-flasher-windows.exe
+          mv artifacts/esp-prog2-flasher-macos/esp-prog2-flasher release-assets/esp-prog2-flasher-macos
+          mv artifacts/esp-prog2-flasher-linux/esp-prog2-flasher release-assets/esp-prog2-flasher-linux
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/esp-prog2-flasher-windows/esp-prog2-flasher.exe
-            artifacts/esp-prog2-flasher-macos/esp-prog2-flasher
-            artifacts/esp-prog2-flasher-linux/esp-prog2-flasher
+          files: release-assets/*
