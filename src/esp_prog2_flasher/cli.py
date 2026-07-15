@@ -56,12 +56,56 @@ def _build_parser() -> argparse.ArgumentParser:
         "--port", default=None, help="Serial port for --flash-probe (default: auto-detect)."
     )
     p.add_argument(
+        "--manufacturer",
+        default=None,
+        help="USB manufacturer name to write into the DFU config block (max 32 ASCII chars). "
+        "Omit to keep the bootloader's compiled-in default.",
+    )
+    p.add_argument(
+        "--product",
+        default=None,
+        help="USB product/device name to write into the DFU config block (max 32 ASCII chars). "
+        "Omit to keep the bootloader's compiled-in default.",
+    )
+    p.add_argument(
         "--freq",
         type=int,
         default=flasher.DEFAULT_FREQUENCY_HZ,
         help=f"SWD clock in Hz for target flashing (default: {flasher.DEFAULT_FREQUENCY_HZ}).",
     )
     return p
+
+
+def _resolve_dfu_names(
+    manufacturer: str | None, product: str | None
+) -> tuple[str | None, str | None]:
+    """Resolve the DFU USB names for a headless flash.
+
+    If neither is given and stdin is interactive, prompt for both (blank keeps
+    the bootloader default). Non-interactive with neither given writes no config
+    block. Supplying exactly one on the command line is an error.
+    """
+    if manufacturer is not None or product is not None:
+        if manufacturer is None or product is None:
+            print(
+                "--manufacturer and --product must be given together (or both omitted).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        return manufacturer, product
+
+    if not sys.stdin.isatty():
+        return None, None
+
+    print("Custom USB names (press Enter to keep the bootloader's defaults):")
+    entered_mfr = input("  Manufacturer: ").strip()
+    entered_prod = input("  Product/device: ").strip()
+    if not entered_mfr and not entered_prod:
+        return None, None
+    if not entered_mfr or not entered_prod:
+        print("Enter both a manufacturer and a product, or leave both blank.", file=sys.stderr)
+        sys.exit(2)
+    return entered_mfr, entered_prod
 
 
 def main() -> None:
@@ -127,8 +171,15 @@ def main() -> None:
         if hex_path is None:
             print("No firmware specified and no bundled hex found.", file=sys.stderr)
             sys.exit(2)
+        manufacturer, product = _resolve_dfu_names(args.manufacturer, args.product)
         try:
-            flasher.flash(hex_path, frequency=args.freq, log=print)
+            flasher.flash(
+                hex_path,
+                frequency=args.freq,
+                log=print,
+                manufacturer=manufacturer,
+                product=product,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Target flash failed")
             print(f"Flash failed: {exc}", file=sys.stderr)

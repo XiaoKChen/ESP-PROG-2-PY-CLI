@@ -174,6 +174,18 @@ class FlasherApp(App):
                     yield Input(value=self._default_hex, placeholder="path to .hex", id="hex_input")
                     yield Button("Browse", id="browse_hex")
                 with Horizontal(classes="row"):
+                    yield Label("USB manufacturer:")
+                    yield Input(
+                        placeholder="optional — blank keeps bootloader default",
+                        id="mfr_input",
+                    )
+                with Horizontal(classes="row"):
+                    yield Label("USB product:")
+                    yield Input(
+                        placeholder="optional — blank keeps bootloader default",
+                        id="prod_input",
+                    )
+                with Horizontal(classes="row"):
                     yield Button("Detect", id="detect", variant="primary")
                     yield Button(
                         "Flash target", id="flash_target", variant="success", disabled=True
@@ -220,10 +232,21 @@ class FlasherApp(App):
         if not hex_path.is_file():
             self._log(f"[red]Bootloader not found:[/red] {hex_path}")
             return
+        mfr = self.query_one("#mfr_input", Input).value.strip()
+        prod = self.query_one("#prod_input", Input).value.strip()
+        if bool(mfr) != bool(prod):
+            self._log(
+                "[red]Enter both a USB manufacturer and product, or leave both blank.[/red]"
+            )
+            return
+        manufacturer = mfr or None
+        product = prod or None
         self._busy(True)
         self._set_progress(0)
         self._log(f"[b]Flashing target[/b] {hex_path.name} …")
-        self.flash_target_worker(hex_path)
+        if manufacturer and product:
+            self._log(f"USB names: manufacturer=[b]{manufacturer}[/b] product=[b]{product}[/b]")
+        self.flash_target_worker(hex_path, manufacturer, product)
 
     def action_flash_probe(self) -> None:
         fw = flasher.find_probe_firmware()
@@ -291,13 +314,17 @@ class FlasherApp(App):
         self.call_from_thread(self._apply_detect, result)
 
     @work(thread=True, exclusive=True, group="flash")
-    def flash_target_worker(self, hex_path: Path) -> None:
+    def flash_target_worker(
+        self, hex_path: Path, manufacturer: str | None, product: str | None
+    ) -> None:
         try:
             flasher.flash(
                 hex_path,
                 frequency=self._frequency,
                 progress=lambda f: self.call_from_thread(self._set_progress, f * 100.0),
                 log=lambda m: self.call_from_thread(self._log, m),
+                manufacturer=manufacturer,
+                product=product,
             )
             self.call_from_thread(self._flash_done, True, "Target flashed and reset.")
         except Exception as exc:  # noqa: BLE001

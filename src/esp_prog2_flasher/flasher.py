@@ -239,13 +239,24 @@ def flash(
     frequency: int = DEFAULT_FREQUENCY_HZ,
     progress: ProgressCallback | None = None,
     log: LogCallback | None = None,
+    manufacturer: str | None = None,
+    product: str | None = None,
 ) -> None:
-    """Program ``hex_path`` to the RA4M1 target and reset it. Raises on failure."""
+    """Program ``hex_path`` to the RA4M1 target and reset it. Raises on failure.
+
+    When both ``manufacturer`` and ``product`` are given, the DFU name config
+    block is also written to the data flash in the same session (after the
+    bootloader hex, before the final reset). Omit them to leave the board on the
+    bootloader's compiled-in default USB names.
+    """
     from pyocd.flash.file_programmer import FileProgrammer
 
     hex_path = Path(hex_path)
     if not hex_path.is_file():
         raise FileNotFoundError(f"Firmware file not found: {hex_path}")
+
+    # Fail fast on bad names before touching hardware.
+    config_block = _config_block_or_none(manufacturer, product)
 
     def _log(msg: str) -> None:
         if log is not None:
@@ -259,9 +270,113 @@ def flash(
     session = _open_session(probe, frequency)
     session.open()
     try:
+        # Reset-and-halt into a known-clean state BEFORE programming. Connecting
+        # to a *running* target — the RA4M1 executing its bootloader/app, with
+        # the clock configured and USB/CAN/flash-LP peripherals live (a parked
+        # bootloader leaves R_FLASH_LP open) — leaves pyOCD's flash algorithm
+        # unable to initialize the RA4M1 flash controller: the first program()
+        # dies with "flash init failure" and only a second attempt (core already
+        # halted from the first) succeeds. Resetting to the halted reset vector
+        # first makes every attempt start from the same clean state.
+        _log("Reset/halt target")
+        session.target.reset_and_halt()
         _log(f"Programming {hex_path.name} ({hex_path.stat().st_size} bytes)")
         programmer = FileProgrammer(session, progress=progress)
         programmer.program(str(hex_path))
+        if config_block is not None:
+            _program_config_block(session, config_block, _log)
+        _log("Resetting target")
+        session.target.reset()
+        _log("Done.")
+    finally:
+        try:
+            session.close()
+        except Exception:
+            logger.debug("session close failed for %s", probe.unique_id, exc_info=True)
+
+
+def _config_block_or_none(manufacturer: str | None, product: str | None) -> bytes | None:
+    """Build the 76-byte DFU config block, or ``None`` when no names are given.
+
+    Raises:
+        ValueError: (as ``InvalidNameError``) if only one name is supplied or a
+            name violates the frozen contract — surfaced at the entry point, not
+            mid-flash.
+    """
+    from .dfu_config import InvalidNameError, build_config_block
+
+    if manufacturer is None and product is None:
+        return None
+    if manufacturer is None or product is None:
+        raise InvalidNameError(
+            "manufacturer and product must be provided together (or both omitted)."
+        )
+    return build_config_block(manufacturer, product)
+
+
+def _program_config_block(session: Session, block: bytes, log: LogCallback) -> None:
+    """Program ``block`` to the DFU config address via the flash algorithm and
+    read-back-verify. Assumes the target is already halted in this ``session``.
+    """
+    import time
+
+    from pyocd.flash.loader import FlashLoader
+
+    from .dfu_config import CONFIG_ADDRESS, DATA_FLASH_ENABLE_ADDR
+
+    log(f"Writing DFU config block ({len(block)} bytes) @ 0x{CONFIG_ADDRESS:08X}")
+    loader = FlashLoader(session, no_reset=True)
+    loader.add_data(CONFIG_ADDRESS, block)
+    loader.commit()
+
+    # The RA4M1 data-flash region (0x40100000) is unreadable over SWD until data-flash
+    # read access is enabled: R_FACI_LP->DFLCTL (0x407EC090) must be 1, followed by a
+    # tDSTOP settling wait (~6 us), or every read returns garbage. pyOCD's flash algo
+    # enables this internally while programming, but our manual read-back runs with
+    # DFLEN=0, so we must set it ourselves before verifying (FSP r_flash_lp.c ~L1101).
+    session.target.write_memory(DATA_FLASH_ENABLE_ADDR, 0x01, transfer_size=8)
+    time.sleep(0.001)  # generously covers the 6 us tDSTOP requirement.
+
+    readback = bytes(session.target.read_memory_block8(CONFIG_ADDRESS, len(block)))
+    if readback != block:
+        raise FlashFailedError(
+            f"DFU config read-back mismatch at 0x{CONFIG_ADDRESS:08X}: "
+            f"wrote {block.hex()}, read {readback.hex()}"
+        )
+    log("DFU config verified.")
+
+
+def write_dfu_config(
+    manufacturer: str,
+    product: str,
+    unique_id: str | None = None,
+    frequency: int = DEFAULT_FREQUENCY_HZ,
+    log: LogCallback | None = None,
+) -> None:
+    """Write only the DFU name config block to the RA4M1 data flash (standalone).
+
+    Opens its own session, reset-and-halts, programs the 76-byte block through
+    the flash algorithm, and read-back-verifies. Raises on failure.
+    """
+    from .dfu_config import build_config_block
+
+    block = build_config_block(manufacturer, product)
+
+    def _log(msg: str) -> None:
+        if log is not None:
+            log(msg)
+
+    probe = _choose_raw(unique_id)
+    if probe is None:
+        raise ProbeNotFoundError("No ESP-Prog-2 / CMSIS-DAP probe connected.")
+
+    _log(f"Opening {TARGET_TYPE} via {probe.unique_id} @ {frequency // 1000} kHz")
+    session = _open_session(probe, frequency)
+    session.open()
+    try:
+        _log("Reset/halt target")
+        session.target.reset_and_halt()
+        _program_config_block(session, block, _log)
         _log("Resetting target")
         session.target.reset()
         _log("Done.")
