@@ -17,6 +17,25 @@ case "$(uname -s)" in
         ;;
 esac
 
+EXISTING="$(command -v esp-prog2-flasher || true)"
+if [ -n "$EXISTING" ]; then
+    echo "Found an existing install: $EXISTING"
+    if [ -t 0 ]; then
+        printf 'Replace it? [y/N] '
+        read -r REPLY
+    else
+        REPLY=""
+        echo "Non-interactive shell — keeping the existing install."
+    fi
+    case "$REPLY" in
+        y|Y|yes|Yes|YES) ;;
+        *)
+            echo "Aborted — existing install kept."
+            exit 0
+            ;;
+    esac
+fi
+
 mkdir -p "$INSTALL_DIR"
 
 if command -v gh >/dev/null 2>&1; then

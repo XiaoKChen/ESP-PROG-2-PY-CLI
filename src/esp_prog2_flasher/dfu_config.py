@@ -38,6 +38,25 @@ _CRC_COVERAGE: Final[int] = BLOCK_SIZE - 4  # 72
 _MIN_ASCII: Final[int] = 0x20
 _MAX_ASCII: Final[int] = 0x7E
 
+# ---------------------------------------------------------------------------
+# Provisioning defaults — the values the flasher OFFERS in its CLI/TUI. NOT part
+# of the frozen block contract; safe to edit here without touching the bootloader
+# (they are just what gets encoded into the block above). Every entry must satisfy
+# _validate_name (printable ASCII, <= MAX_STRING_LEN) — guarded by a host test.
+# ---------------------------------------------------------------------------
+DEFAULT_MANUFACTURER: Final[str] = "Normal Corporation"
+DEVICE_NAMES: Final[tuple[str, ...]] = (
+    "ODU Controller",
+    "ODU Superheat",
+    "ODU Air Sensor",
+    "ODU Power Board",
+    "IDU Controller",
+    "IDU Power Board",
+    "IDU Radar",
+    "IDU Articulation",
+    "IDU Air Sensor",
+)
+
 
 class DfuConfigError(Exception):
     """Base error for this module — callers catch this, not Exception."""
@@ -62,8 +81,7 @@ def _validate_name(field: str, value: str) -> bytes:
         code = ord(char)
         if code < _MIN_ASCII or code > _MAX_ASCII:
             raise InvalidNameError(
-                f"{field} must be printable ASCII (0x20..0x7E); "
-                f"found U+{code:04X} ({char!r})"
+                f"{field} must be printable ASCII (0x20..0x7E); found U+{code:04X} ({char!r})"
             )
     return value.encode("ascii")
 

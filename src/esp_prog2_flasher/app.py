@@ -19,10 +19,12 @@ from textual.widgets import (
     Label,
     ProgressBar,
     RichLog,
+    Select,
     Static,
 )
 
 from . import __version__, flasher
+from .dfu_config import DEFAULT_MANUFACTURER, DEVICE_NAMES
 from .flasher import DetectResult, TargetState
 
 logger = logging.getLogger(__name__)
@@ -175,15 +177,13 @@ class FlasherApp(App):
                     yield Button("Browse", id="browse_hex")
                 with Horizontal(classes="row"):
                     yield Label("USB manufacturer:")
-                    yield Input(
-                        placeholder="optional — blank keeps bootloader default",
-                        id="mfr_input",
-                    )
+                    yield Input(value=DEFAULT_MANUFACTURER, id="mfr_input")
                 with Horizontal(classes="row"):
-                    yield Label("USB product:")
-                    yield Input(
-                        placeholder="optional — blank keeps bootloader default",
-                        id="prod_input",
+                    yield Label("USB device:")
+                    yield Select(
+                        [(name, name) for name in DEVICE_NAMES],
+                        prompt="keep bootloader default",
+                        id="prod_select",
                     )
                 with Horizontal(classes="row"):
                     yield Button("Detect", id="detect", variant="primary")
@@ -232,15 +232,16 @@ class FlasherApp(App):
         if not hex_path.is_file():
             self._log(f"[red]Bootloader not found:[/red] {hex_path}")
             return
+        prod_value = self.query_one("#prod_select", Select).value
+        product = None if prod_value is Select.BLANK else str(prod_value)
         mfr = self.query_one("#mfr_input", Input).value.strip()
-        prod = self.query_one("#prod_input", Input).value.strip()
-        if bool(mfr) != bool(prod):
+        if product is not None and not mfr:
             self._log(
-                "[red]Enter both a USB manufacturer and product, or leave both blank.[/red]"
+                "[red]Enter a USB manufacturer, or clear the device to keep "
+                "bootloader defaults.[/red]"
             )
             return
-        manufacturer = mfr or None
-        product = prod or None
+        manufacturer = mfr if product is not None else None
         self._busy(True)
         self._set_progress(0)
         self._log(f"[b]Flashing target[/b] {hex_path.name} …")

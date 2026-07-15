@@ -11,6 +11,8 @@ from esp_prog2_flasher.dfu_config import (
     BLOCK_SIZE,
     CONFIG_MAGIC,
     CONFIG_VERSION,
+    DEFAULT_MANUFACTURER,
+    DEVICE_NAMES,
     MAX_STRING_LEN,
     InvalidNameError,
     build_config_block,
@@ -87,3 +89,14 @@ def test_rejects_non_ascii_or_nonprintable(bad: str) -> None:
         build_config_block(bad, "ok")
     with pytest.raises(InvalidNameError):
         build_config_block("ok", bad)
+
+
+def test_default_manufacturer_encodes() -> None:
+    build_config_block(DEFAULT_MANUFACTURER, DEVICE_NAMES[0])  # must not raise
+
+
+def test_device_names_are_unique_and_encode() -> None:
+    assert len(DEVICE_NAMES) == len(set(DEVICE_NAMES)), "device names must be unique"
+    for name in DEVICE_NAMES:
+        block = build_config_block(DEFAULT_MANUFACTURER, name)
+        assert len(block) == BLOCK_SIZE

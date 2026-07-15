@@ -10,6 +10,21 @@ $Asset = "esp-prog2-flasher-windows.exe"
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\esp-prog2-flasher"
 $Dest = Join-Path $InstallDir "esp-prog2-flasher.exe"
 
+$Existing = Get-Command "esp-prog2-flasher" -ErrorAction SilentlyContinue
+if ($Existing) {
+    Write-Host "Found an existing install: $($Existing.Source)"
+    if ([Environment]::UserInteractive) {
+        $Reply = Read-Host "Replace it? [y/N]"
+    } else {
+        $Reply = ""
+        Write-Host "Non-interactive shell - keeping the existing install."
+    }
+    if ($Reply -notmatch '^(y|yes)$') {
+        Write-Host "Aborted - existing install kept."
+        exit 0
+    }
+}
+
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
 if (Get-Command gh -ErrorAction SilentlyContinue) {

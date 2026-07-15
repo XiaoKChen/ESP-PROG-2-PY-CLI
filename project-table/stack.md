@@ -12,7 +12,7 @@
   - dev group: `ruff`, `mypy`, `pytest`, `pyinstaller`
 - **LINT:** ruff (`[tool.ruff]`: line-length 100, target py312; rules E/W/F/I/B/UP/SIM) — `uv run ruff check src`
 - **TYPECHECK:** mypy (`[tool.mypy]`: strict, warn_unreachable) — `uv run mypy src`
-- **TEST:** pytest (`[tool.pytest.ini_options]`: testpaths=["tests"], addopts="-q") — `uv run pytest`; `tests/` is currently an empty placeholder
+- **TEST:** pytest (`[tool.pytest.ini_options]`: testpaths=["tests"], addopts="-q") — `uv run pytest`; `tests/` holds `test_dfu_config.py` (DFU config-block encoder)
 - **ENTRY_POINTS:** console script `esp-prog2-flasher = esp_prog2_flasher.cli:main` (`[project.scripts]`); also `uv run python -m esp_prog2_flasher`
 - **SOURCE:** src-layout (`src/esp_prog2_flasher/`)
 - **Detected from:** `pyproject.toml`, `.python-version`, `uv.lock`

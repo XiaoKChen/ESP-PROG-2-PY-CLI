@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from . import flasher
+from .dfu_config import DEFAULT_MANUFACTURER, DEVICE_NAMES
 from .flasher import TargetState
 
 logger = logging.getLogger(__name__)
@@ -57,15 +58,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--manufacturer",
-        default=None,
-        help="USB manufacturer name to write into the DFU config block (max 32 ASCII chars). "
-        "Omit to keep the bootloader's compiled-in default.",
+        default=DEFAULT_MANUFACTURER,
+        help="USB manufacturer name for the DFU config block (max 32 ASCII chars). "
+        f"Default: {DEFAULT_MANUFACTURER!r}.",
     )
     p.add_argument(
         "--product",
         default=None,
-        help="USB product/device name to write into the DFU config block (max 32 ASCII chars). "
-        "Omit to keep the bootloader's compiled-in default.",
+        choices=DEVICE_NAMES,
+        metavar="DEVICE",
+        help="USB device name for the DFU config block; must be one of: "
+        + ", ".join(DEVICE_NAMES)
+        + ". Omit to keep the bootloader's compiled-in default (interactive runs prompt).",
     )
     p.add_argument(
         "--freq",
@@ -77,35 +81,37 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_dfu_names(
-    manufacturer: str | None, product: str | None
+    manufacturer: str, product: str | None
 ) -> tuple[str | None, str | None]:
     """Resolve the DFU USB names for a headless flash.
 
-    If neither is given and stdin is interactive, prompt for both (blank keeps
-    the bootloader default). Non-interactive with neither given writes no config
-    block. Supplying exactly one on the command line is an error.
+    Writing a config block is gated on the *device* (product): with a device
+    selected the block carries ``manufacturer`` (default "Normal Corporation")
+    plus that device. With no device given, an interactive stdin prompts for one
+    from the fixed list; non-interactive writes no block (the bootloader keeps
+    its compiled-in defaults).
     """
-    if manufacturer is not None or product is not None:
-        if manufacturer is None or product is None:
-            print(
-                "--manufacturer and --product must be given together (or both omitted).",
-                file=sys.stderr,
-            )
-            sys.exit(2)
+    if product is not None:
         return manufacturer, product
-
     if not sys.stdin.isatty():
         return None, None
+    return _prompt_dfu_names(manufacturer)
 
-    print("Custom USB names (press Enter to keep the bootloader's defaults):")
-    entered_mfr = input("  Manufacturer: ").strip()
-    entered_prod = input("  Product/device: ").strip()
-    if not entered_mfr and not entered_prod:
+
+def _prompt_dfu_names(default_mfr: str) -> tuple[str | None, str | None]:
+    """Interactively pick a manufacturer (defaulted) and a device from the list."""
+    print("Custom USB names for DFU mode:")
+    entered_mfr = input(f"  Manufacturer [{default_mfr}]: ").strip() or default_mfr
+    print("  Device:")
+    for i, name in enumerate(DEVICE_NAMES, 1):
+        print(f"    {i}) {name}")
+    choice = input(f"  Select 1-{len(DEVICE_NAMES)} (blank = keep bootloader default): ").strip()
+    if not choice:
         return None, None
-    if not entered_mfr or not entered_prod:
-        print("Enter both a manufacturer and a product, or leave both blank.", file=sys.stderr)
+    if not choice.isdigit() or not 1 <= int(choice) <= len(DEVICE_NAMES):
+        print(f"Invalid selection: {choice!r}", file=sys.stderr)
         sys.exit(2)
-    return entered_mfr, entered_prod
+    return entered_mfr, DEVICE_NAMES[int(choice) - 1]
 
 
 def main() -> None:
