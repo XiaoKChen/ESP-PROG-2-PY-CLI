@@ -5,8 +5,9 @@ A `uv`-run Python **TUI/CLI** for the **ESP-Prog-2** debug probe. It does two jo
 1. **Flash a bootloader to a target board** through the probe (auto-detects the
    ESP-Prog-2 on Espressif's USB VID `0x303A`/PID `0x1002`, detects whether the
    target MCU is connected, and programs it with **pyOCD**). It can optionally
-   write **custom USB DFU manufacturer/product names** into the target's data
-   flash (`0x40101C00`), which the bootloader then advertises in DFU mode.
+   write a **device config block** into the target's data flash (`0x40101C00`) —
+   **custom USB DFU manufacturer/product names** the bootloader advertises in DFU
+   mode, plus the **per-device bootloader CAN ID pair** (host→boot / boot→host).
 2. **Reflash the ESP-Prog-2's own firmware** — writes the bundled
    `firmware/esp-prog2.bin` to the ESP32-S3 with **esptool**.
 
@@ -33,8 +34,8 @@ scripts/install.sh        # macOS / Linux → ~/.local/bin/esp-prog2-flasher
 .\scripts\install.ps1     # Windows → %LOCALAPPDATA%\Programs\esp-prog2-flasher (added to user PATH)
 ```
 
-Both take an optional version (e.g. `scripts/install.sh v0.4.0`,
-`.\scripts\install.ps1 -Version v0.4.0`); the default is the latest release.
+Both take an optional version (e.g. `scripts/install.sh v1.0.0`,
+`.\scripts\install.ps1 -Version v1.0.0`); the default is the latest release.
 If `esp-prog2-flasher` is already on your PATH, the scripts report the existing
 install and prompt `Replace it? [y/N]` (default: keep). In a non-interactive /
 non-TTY shell they skip the prompt and keep the existing install.
@@ -67,9 +68,12 @@ firmware, **u** fetch Espressif's official (JTAG) image for reference, **q** qui
 "Flash target" stays disabled until an RA4M1 is detected.
 
 The target panel also has a **USB manufacturer** field (defaults to
-`Normal Corporation`) and a **USB device** dropdown. Pick a device to write the
-custom DFU names into the target's data flash along with the bootloader; leave
-the dropdown on "keep bootloader default" to skip the name write.
+`Normal Corporation`) and a **USB device** dropdown. Pick a known device to write
+its config block (DFU names + the device's fixed boot CAN IDs) into the target's
+data flash along with the bootloader; the CAN ID fields fill in and lock. Pick
+**Custom…** to type your own device name and (optionally) enter a boot CAN ID
+pair — leave both ID fields blank to keep the bootloader defaults. Leave the
+dropdown on "keep bootloader default" to skip the config write entirely.
 
 ### Headless / scripting
 
@@ -78,8 +82,9 @@ uv run esp-prog2-flasher --list             # list connected probes + serial por
 uv run esp-prog2-flasher --detect           # print probe+target status, exit
 uv run esp-prog2-flasher --flash            # flash the RA4M1 bootloader (bundled hex)
 uv run esp-prog2-flasher --flash --hex path/to/other.hex
-uv run esp-prog2-flasher --flash --product "IDU Controller"                 # also write custom DFU names
+uv run esp-prog2-flasher --flash --product "IDU Controller"                 # also write the device config block
 uv run esp-prog2-flasher --flash --product "IDU Controller" --manufacturer "Acme"
+uv run esp-prog2-flasher --flash --product "My Custom Board" --boot-cmd-id 0x700 --boot-reply-id 0x701
 
 uv run esp-prog2-flasher --flash-probe       # flash the bundled SWD firmware (needs download mode)
 uv run esp-prog2-flasher --flash-probe --port COM110
@@ -90,13 +95,19 @@ uv run esp-prog2-flasher --update-probe-fw   # fetch official JTAG image as esp-
 `--freq <hz>` overrides the SWD clock for target flashing (default 1 MHz).
 `--detect` exit codes: `0` target/probe OK, `2` no probe found.
 
-`--product DEVICE` writes the custom USB DFU names alongside the bootloader
-flash; it must be one of a fixed device list (below). `--manufacturer NAME`
-sets the manufacturer string (max 32 ASCII chars, default `Normal Corporation`)
-and only takes effect when a `--product` is given. Omit `--product` and, on an
-interactive terminal, `--flash` prompts you to pick a device (or skip);
-non-interactively it writes no names and the bootloader keeps its compiled-in
-defaults. Valid `--product` values:
+`--product DEVICE` writes the device config block alongside the bootloader flash.
+`--manufacturer NAME` sets the manufacturer string (max 32 ASCII chars, default
+`Normal Corporation`) and only takes effect when a `--product` is given. Omit
+`--product` and, on an interactive terminal, `--flash` prompts you to pick a
+device (or skip); non-interactively it writes no block and the bootloader keeps
+its compiled-in defaults.
+
+A **known device** (from the list below) has its boot CAN ID pair fixed from the
+board table — passing `--boot-cmd-id`/`--boot-reply-id` for one is rejected. Any
+other `--product` value is a **custom device** whose CAN IDs you may set with
+`--boot-cmd-id ID` and `--boot-reply-id ID` (given together; hex like `0x700` or
+decimal, `0x000..0x7FF`). Omit both to keep the bootloader defaults
+(`0x79E`/`0x79F`). Known `--product` values:
 
 - `ODU Controller`, `ODU Superheat`, `ODU Air Sensor`, `ODU Power Board`
 - `IDU Controller`, `IDU Power Board`, `IDU Radar`, `IDU Articulation`, `IDU Air Sensor`
@@ -111,8 +122,9 @@ defaults. Valid `--product` values:
    `pc=0xfffffffe` after reset — still flashable.
 3. **Flash target** — programs the selected `.hex` via pyOCD's `FileProgrammer`
    (equivalent to `pyocd flash -t r7fa4m1ab <hex>`), shows progress, then resets
-   the target. If custom DFU names were given, it also writes the encoded name
-   config block to the target's data flash (`0x40101C00`) before the reset.
+   the target. If a device was given, it also writes the encoded config block
+   (DFU names + boot CAN ID pair) to the target's data flash (`0x40101C00`)
+   before the reset.
 4. **Flash ESP-Prog-2** — writes `firmware/esp-prog2.bin` to the ESP32-S3 with
    esptool (`write-flash 0x0`). Requires the board in ROM download mode (hold
    BOOT, tap RESET) — see [`firmware/README.md`](firmware/README.md).
@@ -123,7 +135,7 @@ defaults. Valid `--product` values:
 ESP-PROG-2-PY-CLI/
 ├── src/esp_prog2_flasher/
 │   ├── flasher.py     # pyOCD (target) + esptool (probe) logic — no UI deps
-│   ├── dfu_config.py  # encode the DFU manufacturer/product name config block
+│   ├── dfu_config.py  # encode the device config block (DFU names + boot CAN IDs)
 │   ├── app.py         # Textual TUI
 │   ├── cli.py         # argparse entry point (TUI by default)
 │   └── __main__.py    # `python -m esp_prog2_flasher`

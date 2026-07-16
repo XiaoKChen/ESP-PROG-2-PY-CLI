@@ -24,10 +24,31 @@ from textual.widgets import (
 )
 
 from . import __version__, flasher
-from .dfu_config import DEFAULT_MANUFACTURER, DEVICE_NAMES
+from .dfu_config import (
+    DEFAULT_BOOT_CMD_ID,
+    DEFAULT_BOOT_REPLY_ID,
+    DEFAULT_MANUFACTURER,
+    DEVICE_CAN_IDS,
+    DEVICE_NAMES,
+    MAX_CAN_ID,
+)
 from .flasher import DetectResult, TargetState
 
 logger = logging.getLogger(__name__)
+
+# Sentinel value/label for the "type your own name" entry in the device Select.
+# A KNOWN device's value is its name (present in DEVICE_CAN_IDS); this is the one
+# option that unlocks the custom-name input and the editable boot CAN ID fields.
+CUSTOM_DEVICE_VALUE: str = "__custom__"
+CUSTOM_DEVICE_LABEL: str = "Custom…"
+
+
+def _parse_can_id(text: str) -> int:
+    """Parse a TUI CAN ID accepting hex (``0x700``) or decimal; raise on bad input."""
+    value = int(text, 0)
+    if not 0 <= value <= MAX_CAN_ID:
+        raise ValueError(f"CAN ID must be 0x000..0x{MAX_CAN_ID:03X}")
+    return value
 
 
 class _HexDirectoryTree(DirectoryTree):
@@ -181,9 +202,24 @@ class FlasherApp(App):
                 with Horizontal(classes="row"):
                     yield Label("USB device:")
                     yield Select(
-                        [(name, name) for name in DEVICE_NAMES],
+                        [(name, name) for name in DEVICE_NAMES]
+                        + [(CUSTOM_DEVICE_LABEL, CUSTOM_DEVICE_VALUE)],
                         prompt="keep bootloader default",
                         id="prod_select",
+                    )
+                with Horizontal(classes="row", id="custom_name_row"):
+                    yield Label("Custom device name:")
+                    yield Input(placeholder="type a device name", id="custom_name_input")
+                with Horizontal(classes="row"):
+                    yield Label("Boot CAN host->boot:")
+                    yield Input(
+                        placeholder=f"blank = default 0x{DEFAULT_BOOT_CMD_ID:03X}",
+                        id="boot_cmd_input",
+                    )
+                    yield Label("boot->host:")
+                    yield Input(
+                        placeholder=f"blank = default 0x{DEFAULT_BOOT_REPLY_ID:03X}",
+                        id="boot_reply_input",
                     )
                 with Horizontal(classes="row"):
                     yield Button("Detect", id="detect", variant="primary")
@@ -208,6 +244,8 @@ class FlasherApp(App):
         self.query_one("#target_panel").border_title = "Target (RA4M1 / UNO R4 Minima)"
         self.query_one("#probe_panel").border_title = "ESP-Prog-2 firmware (ESP32-S3)"
         self.query_one("#log", RichLog).border_title = "Log"
+        # Custom-name input is revealed only when "Custom…" is selected.
+        self.query_one("#custom_name_row").display = False
         self._log(
             f"Target: [b]{flasher.TARGET_TYPE}[/b] via pyOCD  •  "
             f"Probe fw: [b]{flasher.PROBE_CHIP}[/b] via esptool"
@@ -233,7 +271,15 @@ class FlasherApp(App):
             self._log(f"[red]Bootloader not found:[/red] {hex_path}")
             return
         prod_value = self.query_one("#prod_select", Select).value
-        product = None if prod_value is Select.BLANK else str(prod_value)
+        if prod_value is Select.BLANK:
+            product = None
+        elif prod_value == CUSTOM_DEVICE_VALUE:
+            product = self.query_one("#custom_name_input", Input).value.strip()
+            if not product:
+                self._log("[red]Enter a custom device name, or pick a device from the list.[/red]")
+                return
+        else:
+            product = str(prod_value)
         mfr = self.query_one("#mfr_input", Input).value.strip()
         if product is not None and not mfr:
             self._log(
@@ -242,12 +288,42 @@ class FlasherApp(App):
             )
             return
         manufacturer = mfr if product is not None else None
+
+        cmd_raw = self.query_one("#boot_cmd_input", Input).value.strip()
+        reply_raw = self.query_one("#boot_reply_input", Input).value.strip()
+        if (cmd_raw != "") != (reply_raw != ""):
+            self._log(
+                "[red]Set both boot CAN IDs (host->boot and boot->host), or leave "
+                "both blank to keep bootloader defaults.[/red]"
+            )
+            return
+        boot_cmd_id: int | None = None
+        boot_reply_id: int | None = None
+        if cmd_raw and reply_raw:
+            if product is None:
+                self._log(
+                    "[red]Boot CAN IDs need a USB device selected; the block is only "
+                    "written when a device is chosen.[/red]"
+                )
+                return
+            try:
+                boot_cmd_id = _parse_can_id(cmd_raw)
+                boot_reply_id = _parse_can_id(reply_raw)
+            except ValueError as exc:
+                self._log(f"[red]Invalid boot CAN ID:[/red] {exc}")
+                return
+
         self._busy(True)
         self._set_progress(0)
         self._log(f"[b]Flashing target[/b] {hex_path.name} …")
         if manufacturer and product:
             self._log(f"USB names: manufacturer=[b]{manufacturer}[/b] product=[b]{product}[/b]")
-        self.flash_target_worker(hex_path, manufacturer, product)
+        if boot_cmd_id is not None and boot_reply_id is not None:
+            self._log(
+                f"Boot CAN IDs: host->boot=[b]0x{boot_cmd_id:03X}[/b] "
+                f"boot->host=[b]0x{boot_reply_id:03X}[/b]"
+            )
+        self.flash_target_worker(hex_path, manufacturer, product, boot_cmd_id, boot_reply_id)
 
     def action_flash_probe(self) -> None:
         fw = flasher.find_probe_firmware()
@@ -291,6 +367,37 @@ class FlasherApp(App):
 
         self.push_screen(HexPickerScreen(start), apply_choice)
 
+    def on_select_changed(self, event: Select.Changed) -> None:
+        """Tie CAN-ID editability to the device choice.
+
+        KNOWN device → fill both boot CAN ID inputs from the board table and lock
+        them (read-only). "Custom…" → reveal the name input and unlock the ID
+        fields (editable; blank → bootloader defaults). BLANK (keep default) →
+        hide the name input and leave the ID fields empty and editable.
+        """
+        if event.select.id != "prod_select":
+            return
+        value = event.value
+        custom_row = self.query_one("#custom_name_row")
+        cmd_input = self.query_one("#boot_cmd_input", Input)
+        reply_input = self.query_one("#boot_reply_input", Input)
+
+        known_ids = None if value in (Select.BLANK, CUSTOM_DEVICE_VALUE) else DEVICE_CAN_IDS.get(
+            str(value)
+        )
+        custom_row.display = value == CUSTOM_DEVICE_VALUE
+        if known_ids is not None:
+            cmd_id, reply_id = known_ids
+            cmd_input.value = f"0x{cmd_id:02X}"
+            reply_input.value = f"0x{reply_id:02X}"
+            cmd_input.disabled = True
+            reply_input.disabled = True
+        else:
+            cmd_input.value = ""
+            reply_input.value = ""
+            cmd_input.disabled = False
+            reply_input.disabled = False
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         handler = {
             "detect": self.action_detect,
@@ -316,7 +423,12 @@ class FlasherApp(App):
 
     @work(thread=True, exclusive=True, group="flash")
     def flash_target_worker(
-        self, hex_path: Path, manufacturer: str | None, product: str | None
+        self,
+        hex_path: Path,
+        manufacturer: str | None,
+        product: str | None,
+        boot_cmd_id: int | None,
+        boot_reply_id: int | None,
     ) -> None:
         try:
             flasher.flash(
@@ -326,6 +438,8 @@ class FlasherApp(App):
                 log=lambda m: self.call_from_thread(self._log, m),
                 manufacturer=manufacturer,
                 product=product,
+                boot_cmd_id=boot_cmd_id,
+                boot_reply_id=boot_reply_id,
             )
             self.call_from_thread(self._flash_done, True, "Target flashed and reset.")
         except Exception as exc:  # noqa: BLE001

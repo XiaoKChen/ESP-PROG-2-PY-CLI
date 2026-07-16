@@ -241,13 +241,16 @@ def flash(
     log: LogCallback | None = None,
     manufacturer: str | None = None,
     product: str | None = None,
+    boot_cmd_id: int | None = None,
+    boot_reply_id: int | None = None,
 ) -> None:
     """Program ``hex_path`` to the RA4M1 target and reset it. Raises on failure.
 
-    When both ``manufacturer`` and ``product`` are given, the DFU name config
-    block is also written to the data flash in the same session (after the
-    bootloader hex, before the final reset). Omit them to leave the board on the
-    bootloader's compiled-in default USB names.
+    When both ``manufacturer`` and ``product`` are given, the DFU config block is
+    also written to the data flash in the same session (after the bootloader hex,
+    before the final reset), optionally carrying a per-device ``boot_cmd_id`` /
+    ``boot_reply_id`` CAN ID pair. Omit the names to leave the board on the
+    bootloader's compiled-in defaults.
     """
     from pyocd.flash.file_programmer import FileProgrammer
 
@@ -255,8 +258,8 @@ def flash(
     if not hex_path.is_file():
         raise FileNotFoundError(f"Firmware file not found: {hex_path}")
 
-    # Fail fast on bad names before touching hardware.
-    config_block = _config_block_or_none(manufacturer, product)
+    # Fail fast on bad names/IDs before touching hardware.
+    config_block = _config_block_or_none(manufacturer, product, boot_cmd_id, boot_reply_id)
 
     def _log(msg: str) -> None:
         if log is not None:
@@ -295,13 +298,19 @@ def flash(
             logger.debug("session close failed for %s", probe.unique_id, exc_info=True)
 
 
-def _config_block_or_none(manufacturer: str | None, product: str | None) -> bytes | None:
-    """Build the 76-byte DFU config block, or ``None`` when no names are given.
+def _config_block_or_none(
+    manufacturer: str | None,
+    product: str | None,
+    boot_cmd_id: int | None = None,
+    boot_reply_id: int | None = None,
+) -> bytes | None:
+    """Build the DFU config block, or ``None`` when no names are given.
 
     Raises:
-        ValueError: (as ``InvalidNameError``) if only one name is supplied or a
-            name violates the frozen contract — surfaced at the entry point, not
-            mid-flash.
+        ValueError: (as ``InvalidNameError``/``InvalidCanIdError``) if only one
+            name is supplied, a name violates the frozen contract, or the boot
+            CAN ID pair is half-specified or out of range — surfaced at the entry
+            point, not mid-flash.
     """
     from .dfu_config import InvalidNameError, build_config_block
 
@@ -311,7 +320,7 @@ def _config_block_or_none(manufacturer: str | None, product: str | None) -> byte
         raise InvalidNameError(
             "manufacturer and product must be provided together (or both omitted)."
         )
-    return build_config_block(manufacturer, product)
+    return build_config_block(manufacturer, product, boot_cmd_id, boot_reply_id)
 
 
 def _program_config_block(session: Session, block: bytes, log: LogCallback) -> None:
