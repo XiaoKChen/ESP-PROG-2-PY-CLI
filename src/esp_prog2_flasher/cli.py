@@ -31,17 +31,16 @@ def _can_id(text: str) -> int:
             f"invalid CAN ID {text!r}: use hex like 0x700 or decimal"
         ) from None
     if not 0 <= value <= MAX_CAN_ID:
-        raise argparse.ArgumentTypeError(
-            f"CAN ID must be 0x000..0x{MAX_CAN_ID:03X}, got {text!r}"
-        )
+        raise argparse.ArgumentTypeError(f"CAN ID must be 0x000..0x{MAX_CAN_ID:03X}, got {text!r}")
     return value
 
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="esp-prog2-flasher",
-        description="Flash the RA4M1 bootloader through an ESP-Prog-2 (CMSIS-DAP), or reflash "
-        "the ESP-Prog-2's own firmware. With no options, launches the interactive TUI.",
+        description="Flash the RA4M1 bootloader (and, once flashed, an application .bin) "
+        "through an ESP-Prog-2 (CMSIS-DAP), or reflash the ESP-Prog-2's own firmware. With "
+        "no options, launches the interactive TUI.",
     )
     p.add_argument(
         "--list", action="store_true", help="List connected probes and serial ports, then exit."
@@ -51,6 +50,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--flash", action="store_true", help="Flash the RA4M1 bootloader headlessly, then exit."
+    )
+    p.add_argument(
+        "--flash-app",
+        type=Path,
+        default=None,
+        metavar="BIN",
+        help="Flash an application .bin to the RA4M1 target over SWD, then exit. Programs "
+        "the application region only (never the bootloader) — flash the bootloader with "
+        "--flash first.",
+    )
+    p.add_argument(
+        "--app-address",
+        type=lambda text: int(text, 0),
+        default=flasher.APP_BASE_ADDRESS,
+        metavar="ADDR",
+        help="Base address for --flash-app (hex like 0x4000 or decimal). Default: "
+        f"0x{flasher.APP_BASE_ADDRESS:X} (the ArduinoCore-renesas UNO R4 Minima sketch "
+        "load address).",
     )
     p.add_argument(
         "--flash-probe",
@@ -207,8 +224,10 @@ def _prompt_dfu_config(
 
 def _prompt_boot_ids() -> tuple[int | None, int | None]:
     """Prompt for the boot CAN ID pair; blank both = keep bootloader defaults."""
-    print("  Bootloader CAN IDs (hex like 0x700 or decimal; blank = keep defaults "
-          f"0x{DEFAULT_BOOT_CMD_ID:03X}/0x{DEFAULT_BOOT_REPLY_ID:03X}):")
+    print(
+        "  Bootloader CAN IDs (hex like 0x700 or decimal; blank = keep defaults "
+        f"0x{DEFAULT_BOOT_CMD_ID:03X}/0x{DEFAULT_BOOT_REPLY_ID:03X}):"
+    )
     cmd_raw = input("    host->boot ID: ").strip()
     reply_raw = input("    boot->host ID: ").strip()
     if not cmd_raw and not reply_raw:
@@ -262,6 +281,20 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             logger.exception("Probe firmware download failed")
             print(f"Download failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.flash_app:
+        try:
+            flasher.flash_app(
+                args.flash_app,
+                frequency=args.freq,
+                base_address=args.app_address,
+                log=print,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Application flash failed")
+            print(f"Application flash failed: {exc}", file=sys.stderr)
             sys.exit(1)
         return
 

@@ -47,6 +47,18 @@ _BLANK_PC = 0xFFFFFFFE
 _PC_ADDRESS_MASK: Final[int] = 0xFFFFFFFE
 _DOWNLOAD_TIMEOUT_S: Final[int] = 60
 
+# The Arduino UNO R4 Minima / RA4M1 core (ArduinoCore-renesas) reserves the low
+# 16 KiB of code flash for the bootloader and links the sketch to start right
+# after it: variants/MINIMA/memory_regions.ld defines FLASH_IMAGE_START = 0x4000,
+# and fsp.ld uses it as the sketch's FLASH region origin — this is the address a
+# PlatformIO/Arduino build for this board is linked at, i.e. "where pio upload
+# writes it". Verified against the bootloader bundled in this repo
+# (hex/dfu_minima.hex): its code ends at 0x3088 (well under 0x4000) and its ID
+# Code block write lands at 0x01010018, matching ID_CODE_START in that same
+# memory_regions.ld — confirming this bootloader was built from that exact
+# linker layout.
+APP_BASE_ADDRESS: Final[int] = 0x4000
+
 ProgressCallback = Callable[[float], None]
 LogCallback = Callable[[str], None]
 
@@ -288,6 +300,61 @@ def flash(
         programmer.program(str(hex_path))
         if config_block is not None:
             _program_config_block(session, config_block, _log)
+        _log("Resetting target")
+        session.target.reset()
+        _log("Done.")
+    finally:
+        try:
+            session.close()
+        except Exception:
+            logger.debug("session close failed for %s", probe.unique_id, exc_info=True)
+
+
+def flash_app(
+    bin_path: Path,
+    unique_id: str | None = None,
+    frequency: int = DEFAULT_FREQUENCY_HZ,
+    base_address: int = APP_BASE_ADDRESS,
+    progress: ProgressCallback | None = None,
+    log: LogCallback | None = None,
+) -> None:
+    """Program an application ``.bin`` at ``base_address`` and reset. Raises on failure.
+
+    Flash the bootloader with ``flash()`` first — this programs the application
+    region ONLY (sector erase of just the written pages, never a chip erase), so
+    the already-flashed bootloader is left untouched. A ``.bin`` carries no
+    embedded load address, so ``base_address`` (default ``APP_BASE_ADDRESS``) is
+    passed explicitly to pyOCD's ``FileProgrammer``.
+    """
+    from pyocd.flash.file_programmer import FileProgrammer
+
+    bin_path = Path(bin_path)
+    if not bin_path.is_file():
+        raise FileNotFoundError(f"Application file not found: {bin_path}")
+
+    def _log(msg: str) -> None:
+        if log is not None:
+            log(msg)
+
+    probe = _choose_raw(unique_id)
+    if probe is None:
+        raise ProbeNotFoundError("No ESP-Prog-2 / CMSIS-DAP probe connected.")
+
+    _log(f"Opening {TARGET_TYPE} via {probe.unique_id} @ {frequency // 1000} kHz")
+    session = _open_session(probe, frequency)
+    session.open()
+    try:
+        # See flash(): reset-and-halt first so pyOCD's flash algorithm always
+        # starts from the same clean state.
+        _log("Reset/halt target")
+        session.target.reset_and_halt()
+        _log(
+            f"Programming {bin_path.name} ({bin_path.stat().st_size} bytes) @ 0x{base_address:08X}"
+        )
+        # chip_erase="sector" erases only the pages this .bin touches — the
+        # bootloader region below base_address is never erased or written.
+        programmer = FileProgrammer(session, progress=progress, chip_erase="sector")
+        programmer.program(str(bin_path), file_format="bin", base_address=base_address)
         _log("Resetting target")
         session.target.reset()
         _log("Done.")
