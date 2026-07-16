@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # Build the esp-prog2-flasher one-file executable for arm64 Android (Termux).
 #
-# DELIBERATE EXCEPTION to the repo's uv-only rule: uv does NOT support Android
-# (recent Termux Python reports its OS as `android`, which uv's platform
-# detection rejects with "Unknown operating system: android"). Termux's stdlib
-# `venv` is also broken (ensurepip fails). So on Termux we install straight into
-# Termux's own system pip — Termux is already an isolated single-user $PREFIX,
-# so a venv buys nothing here. Everywhere else, use scripts/build.sh (uv).
+# DELIBERATE EXCEPTION to the repo's uv-only rule. On Termux we cannot use uv at
+# all:
+#   * uv itself rejects Android ("Unknown operating system: android").
+#   * the project's build backend is uv_build (Rust); pip cannot build it on
+#     Android because rustup has no aarch64-unknown-linux-android target.
+#   * Termux's stdlib venv is broken (ensurepip fails).
+# So this script does NOT install the project — it installs only the runtime
+# dependencies (read from pyproject.toml, so they stay in lockstep) plus
+# PyInstaller, straight into Termux's system pip, then builds from src/ (the
+# spec's pathex=["src"] makes the package importable without an install).
+# Everywhere else, use scripts/build.sh (uv).
 #
 # PyInstaller freezes the running interpreter — it does NOT cross-compile — so
 # this MUST run inside Termux on an aarch64 Android device. The resulting binary
@@ -18,6 +23,7 @@
 #   pkg install python rust clang binutils libusb
 #     - rust/clang/binutils: build cmsis-pack-manager + capstone from source
 #       (no prebuilt Android aarch64 wheels on PyPI); expect a long first build.
+#       Termux's `rust` package targets Android natively, unlike rustup.
 #     - libusb: required by pyocd/libusb-package to reach the probe.
 # Runtime note: USB access on Android needs Termux's USB API (`pkg install
 # termux-api` + the Termux:API app, `termux-usb`); a plain Termux shell cannot
@@ -44,12 +50,22 @@ if ! command -v pip >/dev/null 2>&1; then
     exit 1
 fi
 
-# Editable install pulls the project's runtime deps from pyproject.toml; add
-# pyinstaller (a dev-group tool not in [project.dependencies]) explicitly.
-pip install -e . pyinstaller
+# Read [project.dependencies] from pyproject.toml so this list never drifts from
+# the real dependency set. We install the deps, NOT the project (its uv_build
+# backend won't build on Android — see the header).
+mapfile -t DEPS < <(
+    python -c 'import pathlib, tomllib; print("\n".join(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["dependencies"]))'
+)
+if [ "${#DEPS[@]}" -eq 0 ]; then
+    echo "Error: parsed no dependencies from pyproject.toml — aborting." >&2
+    exit 1
+fi
+
+pip install "${DEPS[@]}" pyinstaller
 
 # --noupx overrides the spec's upx=True: UPX is usually absent on Termux and can
-# corrupt the aarch64 bootloader. The rest of the build reuses the shared spec.
+# corrupt the aarch64 bootloader. The rest of the build reuses the shared spec,
+# which analyses src/esp_prog2_flasher/__main__.py via pathex=["src"].
 pyinstaller esp-prog2-flasher.spec --noconfirm --noupx
 
 OUT="dist/esp-prog2-flasher-android-arm64"
