@@ -8,6 +8,11 @@ A `uv`-run Python **TUI/CLI** for the **ESP-Prog-2** debug probe. It does two jo
    write a **device config block** into the target's data flash (`0x40101C00`) —
    **custom USB DFU manufacturer/product names** the bootloader advertises in DFU
    mode, plus the **per-device bootloader CAN ID pair** (host→boot / boot→host).
+   Once the bootloader is in place it can also **flash an application `.bin`**
+   (e.g. a PlatformIO/Arduino build) to the target's application region
+   (`0x4000`) over SWD — the same image `pio run -t upload` sends over DFU, but
+   pushed through the probe. It programs the application region only, leaving the
+   bootloader untouched.
 2. **Reflash the ESP-Prog-2's own firmware** — writes the bundled
    `firmware/esp-prog2.bin` to the ESP32-S3 with **esptool**.
 
@@ -63,9 +68,11 @@ uv sync          # create .venv from uv.lock
 uv run esp-prog2-flasher          # launch the interactive TUI
 ```
 
-TUI keys: **d** detect, **f** flash target (RA4M1), **p** flash the ESP-Prog-2
-firmware, **u** fetch Espressif's official (JTAG) image for reference, **q** quit.
-"Flash target" stays disabled until an RA4M1 is detected.
+TUI keys: **d** detect, **f** flash target (RA4M1), **a** flash application
+`.bin`, **p** flash the ESP-Prog-2 firmware, **u** fetch Espressif's official
+(JTAG) image for reference, **q** quit. "Flash target" and "Flash app" stay
+disabled until an RA4M1 is detected. The **Application (RA4M1 over SWD)** panel
+(pick a `.bin`, then Flash app) writes to the app region above the bootloader.
 
 The target panel also has a **USB manufacturer** field (defaults to
 `Normal Corporation`) and a **USB device** dropdown. Pick a known device to write
@@ -85,6 +92,9 @@ uv run esp-prog2-flasher --flash --hex path/to/other.hex
 uv run esp-prog2-flasher --flash --product "IDU Controller"                 # also write the device config block
 uv run esp-prog2-flasher --flash --product "IDU Controller" --manufacturer "Acme"
 uv run esp-prog2-flasher --flash --product "My Custom Board" --boot-cmd-id 0x700 --boot-reply-id 0x701
+
+uv run esp-prog2-flasher --flash-app path/to/firmware.bin        # flash an app .bin to the RA4M1 app region (0x4000)
+uv run esp-prog2-flasher --flash-app path/to/firmware.bin --app-address 0x4000   # override the base address
 
 uv run esp-prog2-flasher --flash-probe       # flash the bundled SWD firmware (needs download mode)
 uv run esp-prog2-flasher --flash-probe --port COM110
@@ -125,7 +135,12 @@ decimal, `0x000..0x7FF`). Omit both to keep the bootloader defaults
    the target. If a device was given, it also writes the encoded config block
    (DFU names + boot CAN ID pair) to the target's data flash (`0x40101C00`)
    before the reset.
-4. **Flash ESP-Prog-2** — writes `firmware/esp-prog2.bin` to the ESP32-S3 with
+4. **Flash application** — programs an app `.bin` at the application base address
+   (`0x4000` by default, overridable) via pyOCD's `FileProgrammer`, then resets.
+   A `.bin` carries no load address, so the base address is supplied explicitly;
+   only the pages the image touches are sector-erased, so the bootloader region
+   below it is left intact.
+5. **Flash ESP-Prog-2** — writes `firmware/esp-prog2.bin` to the ESP32-S3 with
    esptool (`write-flash 0x0`). Requires the board in ROM download mode (hold
    BOOT, tap RESET) — see [`firmware/README.md`](firmware/README.md).
 

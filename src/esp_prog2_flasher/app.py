@@ -1,4 +1,4 @@
-"""Textual TUI: flash the RA4M1 target bootloader, or the ESP-Prog-2's own firmware."""
+"""Textual TUI: flash the RA4M1 target bootloader/application, or the ESP-Prog-2's own firmware."""
 
 from __future__ import annotations
 
@@ -51,10 +51,11 @@ def _parse_can_id(text: str) -> int:
     return value
 
 
-class _HexDirectoryTree(DirectoryTree):
-    """Directory tree showing only directories and .hex files matching a name filter."""
+class _FilteredDirectoryTree(DirectoryTree):
+    """Directory tree showing only directories and files with a given suffix + name filter."""
 
     name_filter: str = ""
+    suffix_filter: str = ""
 
     def filter_paths(self, paths: Iterable[Path]) -> Iterable[Path]:
         needle = self.name_filter.lower()
@@ -62,17 +63,21 @@ class _HexDirectoryTree(DirectoryTree):
             p
             for p in paths
             if (p.is_dir() and not p.name.startswith("."))
-            or (p.suffix.lower() == ".hex" and needle in p.name.lower())
+            or (p.suffix.lower() == self.suffix_filter and needle in p.name.lower())
         ]
 
 
-class HexPickerScreen(ModalScreen[Path | None]):
-    """Modal file dialog: type a path, browse the tree, filter .hex files by name."""
+class FilePickerScreen(ModalScreen[Path | None]):
+    """Modal file dialog: type a path, browse the tree, filter files by suffix + name.
+
+    Shared by the bootloader (.hex) and application (.bin) pickers — only the
+    suffix and dialog title differ between them.
+    """
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
     CSS = """
-    HexPickerScreen { align: center middle; }
+    FilePickerScreen { align: center middle; }
     #picker_dialog {
         width: 90;
         max-width: 95%;
@@ -87,36 +92,39 @@ class HexPickerScreen(ModalScreen[Path | None]):
     #picker_buttons Button { margin: 0 0 0 1; }
     """
 
-    def __init__(self, start: Path) -> None:
+    def __init__(self, start: Path, suffix: str, title: str) -> None:
         super().__init__()
         self._start = start
+        self._suffix = suffix
+        self._title = title
         self._chosen: Path | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="picker_dialog"):
             yield Input(value=str(self._start), placeholder="directory to browse", id="picker_path")
-            yield Input(placeholder="filter .hex file names…", id="picker_filter")
-            yield _HexDirectoryTree(self._start, id="picker_tree")
+            yield Input(placeholder=f"filter {self._suffix} file names…", id="picker_filter")
+            yield _FilteredDirectoryTree(self._start, id="picker_tree")
             with Horizontal(id="picker_buttons"):
                 yield Button("Select", id="picker_select", variant="primary", disabled=True)
                 yield Button("Cancel", id="picker_cancel")
 
     def on_mount(self) -> None:
-        self.query_one("#picker_dialog", Vertical).border_title = "Select bootloader .hex"
+        self.query_one(_FilteredDirectoryTree).suffix_filter = self._suffix
+        self.query_one("#picker_dialog", Vertical).border_title = self._title
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "picker_path":
             return
         new_root = Path(event.value).expanduser()
         if new_root.is_dir():
-            self.query_one(_HexDirectoryTree).path = new_root
+            self.query_one(_FilteredDirectoryTree).path = new_root
         else:
             self.notify(f"Not a directory: {new_root}", severity="error")
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id != "picker_filter":
             return
-        tree = self.query_one(_HexDirectoryTree)
+        tree = self.query_one(_FilteredDirectoryTree)
         tree.name_filter = event.value
         tree.reload()
 
@@ -146,24 +154,28 @@ class FlasherApp(App):
     .panel {
         width: 1fr;
         height: auto;
-        margin: 0 1 0 0;
         padding: 1 2;
         background: $panel;
         border: round $primary;
     }
-    .panel:last-of-type { margin: 0; }
-    #probe_status, #target_status, #serial_status, #fw_status { height: auto; padding: 0 0 1 0; }
+    #target_panel { margin: 0 1 0 0; }
+    #right_column { width: 1fr; height: auto; }
+    #app_panel { margin: 1 0 0 0; }
+    #probe_status, #target_status, #serial_status, #fw_status, #app_status {
+        height: auto; padding: 0 0 1 0;
+    }
     .ok { color: $success; text-style: bold; }
     .warn { color: $warning; text-style: bold; }
     .err { color: $error; text-style: bold; }
     .row { height: auto; padding: 1 0 0 0; }
     .row Label { padding: 1 1 0 0; width: auto; }
     .row Button { margin: 0 1 0 0; }
-    #hex_input { width: 1fr; margin: 0 1 0 0; }
+    #hex_input, #app_input { width: 1fr; margin: 0 1 0 0; }
     #footer_row { height: auto; padding: 1 2; align: left middle; }
     #progress { width: 1fr; margin: 0 2 0 0; }
     RichLog {
         height: 1fr;
+        min-height: 8;
         margin: 0 2 1 2;
         border: round $accent;
         background: $surface-darken-1;
@@ -174,6 +186,7 @@ class FlasherApp(App):
     BINDINGS = [
         ("d", "detect", "Detect"),
         ("f", "flash_target", "Flash target"),
+        ("a", "flash_app", "Flash app"),
         ("p", "flash_probe", "Flash probe"),
         ("u", "update_fw", "Update fw"),
         ("q", "quit", "Quit"),
@@ -227,12 +240,24 @@ class FlasherApp(App):
                         "Flash target", id="flash_target", variant="success", disabled=True
                     )
 
-            with Vertical(id="probe_panel", classes="panel"):
-                yield Static("Serial: …", id="serial_status")
-                yield Static("Firmware: …", id="fw_status")
-                with Horizontal(classes="row"):
-                    yield Button("Get official (JTAG)", id="update_fw", variant="primary")
-                    yield Button("Flash ESP-Prog-2", id="flash_probe", variant="warning")
+            with Vertical(id="right_column"):
+                with Vertical(id="probe_panel", classes="panel"):
+                    yield Static("Serial: …", id="serial_status")
+                    yield Static("Firmware: …", id="fw_status")
+                    with Horizontal(classes="row"):
+                        yield Button("Get official (JTAG)", id="update_fw", variant="primary")
+                        yield Button("Flash ESP-Prog-2", id="flash_probe", variant="warning")
+                with Vertical(id="app_panel", classes="panel"):
+                    yield Static(
+                        "Application flashed to the RA4M1 over SWD, above the bootloader.",
+                        id="app_status",
+                    )
+                    with Horizontal(classes="row"):
+                        yield Label("Application (.bin):")
+                        yield Input(placeholder="path to app .bin", id="app_input")
+                        yield Button("Browse", id="browse_app")
+                    with Horizontal(classes="row"):
+                        yield Button("Flash app", id="flash_app", variant="success", disabled=True)
 
         with Horizontal(id="footer_row"):
             yield ProgressBar(total=100, show_eta=False, id="progress")
@@ -243,6 +268,7 @@ class FlasherApp(App):
     def on_mount(self) -> None:
         self.query_one("#target_panel").border_title = "Target (RA4M1 / UNO R4 Minima)"
         self.query_one("#probe_panel").border_title = "ESP-Prog-2 firmware (ESP32-S3)"
+        self.query_one("#app_panel").border_title = "Application (RA4M1 over SWD)"
         self.query_one("#log", RichLog).border_title = "Log"
         # Custom-name input is revealed only when "Custom…" is selected.
         self.query_one("#custom_name_row").display = False
@@ -365,7 +391,33 @@ class FlasherApp(App):
             if chosen is not None:
                 self.query_one("#hex_input", Input).value = str(chosen)
 
-        self.push_screen(HexPickerScreen(start), apply_choice)
+        self.push_screen(FilePickerScreen(start, ".hex", "Select bootloader .hex"), apply_choice)
+
+    def action_flash_app(self) -> None:
+        if not (self._detect and self._detect.flashable):
+            self._log("[yellow]No RA4M1 target detected. Run Detect first.[/yellow]")
+            return
+        bin_path = Path(self.query_one("#app_input", Input).value.strip())
+        if not bin_path.is_file():
+            self._log(f"[red]Application binary not found:[/red] {bin_path}")
+            return
+
+        self._busy(True)
+        self._set_progress(0)
+        self._log(f"[b]Flashing application[/b] {bin_path.name} …")
+        self.flash_app_worker(bin_path)
+
+    def action_browse_app(self) -> None:
+        current = self.query_one("#app_input", Input).value
+        start = Path(current).expanduser().parent if current else Path.cwd()
+        if not start.is_dir():
+            start = Path.cwd()
+
+        def apply_choice(chosen: Path | None) -> None:
+            if chosen is not None:
+                self.query_one("#app_input", Input).value = str(chosen)
+
+        self.push_screen(FilePickerScreen(start, ".bin", "Select application .bin"), apply_choice)
 
     def on_select_changed(self, event: Select.Changed) -> None:
         """Tie CAN-ID editability to the device choice.
@@ -382,8 +434,8 @@ class FlasherApp(App):
         cmd_input = self.query_one("#boot_cmd_input", Input)
         reply_input = self.query_one("#boot_reply_input", Input)
 
-        known_ids = None if value in (Select.BLANK, CUSTOM_DEVICE_VALUE) else DEVICE_CAN_IDS.get(
-            str(value)
+        known_ids = (
+            None if value in (Select.BLANK, CUSTOM_DEVICE_VALUE) else DEVICE_CAN_IDS.get(str(value))
         )
         custom_row.display = value == CUSTOM_DEVICE_VALUE
         if known_ids is not None:
@@ -402,9 +454,11 @@ class FlasherApp(App):
         handler = {
             "detect": self.action_detect,
             "flash_target": self.action_flash_target,
+            "flash_app": self.action_flash_app,
             "flash_probe": self.action_flash_probe,
             "update_fw": self.action_update_fw,
             "browse_hex": self.action_browse_hex,
+            "browse_app": self.action_browse_app,
             "quit": self.exit,
         }.get(event.button.id)
         if handler:
@@ -445,6 +499,20 @@ class FlasherApp(App):
         except Exception as exc:  # noqa: BLE001
             logger.exception("Flash target worker failed")
             self.call_from_thread(self._flash_done, False, f"Target flash failed: {exc!r}")
+
+    @work(thread=True, exclusive=True, group="flash")
+    def flash_app_worker(self, bin_path: Path) -> None:
+        try:
+            flasher.flash_app(
+                bin_path,
+                frequency=self._frequency,
+                progress=lambda f: self.call_from_thread(self._set_progress, f * 100.0),
+                log=lambda m: self.call_from_thread(self._log, m),
+            )
+            self.call_from_thread(self._flash_done, True, "Application flashed and reset.")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Flash app worker failed")
+            self.call_from_thread(self._flash_done, False, f"Application flash failed: {exc!r}")
 
     @work(thread=True, exclusive=True, group="flash")
     def flash_probe_worker(self, fw: Path, port: str) -> None:
@@ -495,6 +563,7 @@ class FlasherApp(App):
         target.set_classes(cls)
         target.update(text)
         self.query_one("#flash_target", Button).disabled = not result.flashable
+        self.query_one("#flash_app", Button).disabled = not result.flashable
         self._log(result.detail)
 
     def _refresh_serial_status(self) -> None:
@@ -536,9 +605,9 @@ class FlasherApp(App):
         self._log(f"[{'green' if ok else 'red'}]{message}[/]")
 
     def _busy(self, busy: bool) -> None:
-        for bid in ("detect", "flash_target", "flash_probe", "update_fw"):
+        for bid in ("detect", "flash_target", "flash_app", "flash_probe", "update_fw"):
             btn = self.query_one(f"#{bid}", Button)
-            if bid == "flash_target":
+            if bid in ("flash_target", "flash_app"):
                 btn.disabled = busy or not (self._detect and self._detect.flashable)
             else:
                 btn.disabled = busy
