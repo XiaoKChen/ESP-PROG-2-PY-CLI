@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Final
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -12,6 +13,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
+    Checkbox,
     DirectoryTree,
     Footer,
     Header,
@@ -41,6 +43,10 @@ logger = logging.getLogger(__name__)
 # option that unlocks the custom-name input and the editable boot CAN ID fields.
 CUSTOM_DEVICE_VALUE: str = "__custom__"
 CUSTOM_DEVICE_LABEL: str = "Custom…"
+
+# Embassy bootloader reserves 32 KiB for itself, so its app slot starts here
+# (vs. the 16 KiB C bootloader's flasher.APP_BASE_ADDRESS == 0x4000).
+EMBASSY_APP_BASE_ADDRESS: Final[int] = 0x8000
 
 
 def _parse_can_id(text: str) -> int:
@@ -257,6 +263,8 @@ class FlasherApp(App):
                         yield Input(placeholder="path to app .bin", id="app_input")
                         yield Button("Browse", id="browse_app")
                     with Horizontal(classes="row"):
+                        yield Checkbox("Embassy bootloader", id="embassy_checkbox")
+                    with Horizontal(classes="row"):
                         yield Button("Flash app", id="flash_app", variant="success", disabled=True)
 
         with Horizontal(id="footer_row"):
@@ -401,11 +409,16 @@ class FlasherApp(App):
         if not bin_path.is_file():
             self._log(f"[red]Application binary not found:[/red] {bin_path}")
             return
+        base_address = (
+            EMBASSY_APP_BASE_ADDRESS
+            if self.query_one("#embassy_checkbox", Checkbox).value
+            else flasher.APP_BASE_ADDRESS
+        )
 
         self._busy(True)
         self._set_progress(0)
         self._log(f"[b]Flashing application[/b] {bin_path.name} …")
-        self.flash_app_worker(bin_path)
+        self.flash_app_worker(bin_path, base_address)
 
     def action_browse_app(self) -> None:
         current = self.query_one("#app_input", Input).value
@@ -501,10 +514,11 @@ class FlasherApp(App):
             self.call_from_thread(self._flash_done, False, f"Target flash failed: {exc!r}")
 
     @work(thread=True, exclusive=True, group="flash")
-    def flash_app_worker(self, bin_path: Path) -> None:
+    def flash_app_worker(self, bin_path: Path, base_address: int) -> None:
         try:
             flasher.flash_app(
                 bin_path,
+                base_address=base_address,
                 frequency=self._frequency,
                 progress=lambda f: self.call_from_thread(self._set_progress, f * 100.0),
                 log=lambda m: self.call_from_thread(self._log, m),
