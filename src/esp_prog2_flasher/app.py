@@ -177,6 +177,7 @@ class FlasherApp(App):
     .row Label { padding: 1 1 0 0; width: auto; }
     .row Button { margin: 0 1 0 0; }
     #hex_input, #app_input { width: 1fr; margin: 0 1 0 0; }
+    #boot_cmd_input, #boot_reply_input { width: 1fr; }
     #footer_row { height: auto; padding: 1 2; align: left middle; }
     #progress { width: 1fr; margin: 0 2 0 0; }
     RichLog {
