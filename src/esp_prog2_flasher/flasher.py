@@ -42,6 +42,10 @@ DEFAULT_BAUD_RATE: Final[int] = 921600
 ESPTOOL_SHIM_FLAG: Final[str] = "--esptool-shim"
 
 _HEX_NAME = "dfu_minima.hex"
+# Slim Renesas.RA_DFP CMSIS pack (pdsc + RA4M1 flash algorithms only) bundled so
+# pyOCD can resolve the r7fa4m1ab target offline — without the pack first being
+# downloaded into the user's ~/.pyocd cache via `pyocd pack install`. See packs/.
+_PACK_NAME = "Renesas.RA_DFP.slim.pack"
 # A blank Cortex-M reads this in PC after reset (vector table = 0xFFFFFFFF).
 _BLANK_PC = 0xFFFFFFFE
 _PC_ADDRESS_MASK: Final[int] = 0xFFFFFFFE
@@ -100,6 +104,13 @@ def _find_bundled(*parts: str) -> Path | None:
 def find_default_hex() -> Path | None:
     """Locate the bundled ``hex/dfu_minima.hex`` regardless of how we were launched."""
     return _find_bundled("hex", _HEX_NAME)
+
+
+def find_default_pack() -> Path | None:
+    """Locate the bundled slim RA_DFP CMSIS pack, which defines the r7fa4m1ab
+    target and its flash algorithm so the RA4M1 can be flashed without the pack
+    first being installed into the user's cmsis-pack-manager cache."""
+    return _find_bundled("packs", _PACK_NAME)
 
 
 @dataclass(frozen=True)
@@ -192,10 +203,14 @@ def find_esp_prog() -> ProbeInfo | None:
 def _open_session(probe: DebugProbe, frequency: int) -> Session:
     from pyocd.core.session import Session
 
-    return Session(
-        probe,
-        options={"target_override": TARGET_TYPE, "frequency": frequency},
-    )
+    options: dict[str, object] = {"target_override": TARGET_TYPE, "frequency": frequency}
+    # Point pyOCD at the bundled pack when present so r7fa4m1ab resolves offline.
+    # Absent (e.g. a plain `uv run` dev checkout), pyOCD falls back to the pack
+    # installed in the user's cmsis-pack-manager cache, preserving old behaviour.
+    pack = find_default_pack()
+    if pack is not None:
+        options["pack"] = [str(pack)]
+    return Session(probe, options=options)
 
 
 def detect(unique_id: str | None = None, frequency: int = DEFAULT_FREQUENCY_HZ) -> DetectResult:

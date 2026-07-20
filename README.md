@@ -172,8 +172,10 @@ ESP-PROG-2-PY-CLI/
   stock esp-usb-bridge advertises subclass `0xFF` (its esp_usb_jtag id), so the
   bundled firmware is built with the interface subclass forced to `0` — without
   that, the probe enumerates but pyOCD reports "no probe."
-- If `--detect` says the target type is unknown, install the device pack once:
-  `uv run pyocd pack install r7fa4m1ab`.
+- The `r7fa4m1ab` device pack ships bundled (`packs/`), so flashing works
+  offline with no `pyocd pack install` step. In a bare source checkout the
+  bundled pack is still found via `find_default_pack()`; if it is ever missing,
+  pyOCD falls back to the pack in the user's cmsis-pack-manager cache.
 
 ## Development
 
@@ -201,11 +203,10 @@ Produces `dist/esp-prog2-flasher.exe` (Windows) or `dist/esp-prog2-flasher`
 binary. GitHub Actions (`.github/workflows/build.yml`) builds all three
 platforms on every push and attaches them to the GitHub release on `v*` tags.
 
-Note: flashing the RA4M1 target for the first time still requires pyOCD's
-`r7fa4m1ab` device pack, which pyOCD installs into the user's home directory
-(`~/.pyocd`) at runtime, not into the bundle. Run `uv run pyocd pack install
-r7fa4m1ab` once (from any pyOCD install, not necessarily this project's venv)
-before the first target flash on a machine.
+The bundled `hex/`, `firmware/`, and `packs/` files are packed into the binary,
+including the slim `r7fa4m1ab` CMSIS device pack — so a fresh machine with no
+Python, no pyOCD, and no network can flash the RA4M1 out of the box (no
+`pyocd pack install` step). See [`packs/README.md`](packs/README.md).
 
 ## Dependencies
 
