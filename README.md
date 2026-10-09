@@ -96,6 +96,10 @@ uv run esp-prog2-flasher --flash --product "My Custom Board" --boot-cmd-id 0x700
 uv run esp-prog2-flasher --flash-app path/to/firmware.bin        # flash an app .bin to the RA4M1 app region (0x4000)
 uv run esp-prog2-flasher --flash-app path/to/firmware.bin --app-address 0x4000   # override the base address
 
+uv run esp-prog2-flasher --detect --psoc6   # detect a PSoC 6 target (IDU Radar) instead of the RA4M1
+uv run esp-prog2-flasher --flash-psoc6      # flash the PSoC 6 with the bundled hex (bootloader + App1)
+uv run esp-prog2-flasher --flash-psoc6 --hex path/to/psoc6.hex
+
 uv run esp-prog2-flasher --flash-probe       # flash the bundled SWD firmware (needs download mode)
 uv run esp-prog2-flasher --flash-probe --port COM110
 uv run esp-prog2-flasher --flash-probe --probe-bin path/to/other.bin
@@ -121,6 +125,23 @@ decimal, `0x000..0x7FF`). Omit both to keep the bootloader defaults
 
 - `ODU Controller`, `ODU Superheat`, `ODU Air Sensor`, `ODU Power Board`
 - `IDU Controller`, `IDU Power Board`, `IDU Radar`, `IDU Articulation`, `IDU Air Sensor`
+
+## PSoC 6 (IDU Radar)
+
+The IDU Radar board's PSoC 62S3 (CY8C6245) is flashed over SWD through the same
+ESP-Prog-2 using pyOCD's built-in `cy8c6xx5` target (no CMSIS pack needed).
+
+- **CLI:** `--detect --psoc6` to check the link, `--flash-psoc6` to flash
+  (`--hex PATH` overrides the bundled image, `--freq` sets the SWD clock).
+- **TUI:** the *PSoC 6* panel (key `6`) flashes the bundled hex or one picked with
+  *Browse*.
+- **Wiring (3.3 V target):** probe SWDIO, SWCLK, GND and VTref to the board's SWD
+  header; also XRES if the header exposes it.
+- **Image:** `hex/psoc6_radar_full_image.hex` is `full_image.hex` (bootloader + App1)
+  from the [PSOC6-Dual-Radar v2.0.1 release](https://github.com/XiaoKChen/PSOC6-Dual-Radar/releases/tag/v2.0.1).
+- **Safety:** only data inside main flash (`0x10000000`-`0x10080000`) is written.
+  Cypress metadata pseudo-sections (`0x90xxxxxx`) are dropped; any other
+  out-of-range data (e.g. SFLASH, eFuse) aborts the flash before touching hardware.
 
 ## What it does
 
@@ -154,7 +175,7 @@ ESP-PROG-2-PY-CLI/
 │   ├── app.py         # Textual TUI
 │   ├── cli.py         # argparse entry point (TUI by default)
 │   └── __main__.py    # `python -m esp_prog2_flasher`
-├── hex/             # bundled dfu_minima.hex (RA4M1 bootloader); override with --hex
+├── hex/             # bundled dfu_minima.hex (RA4M1 bootloader) + psoc6_radar_full_image.hex; override with --hex
 ├── firmware/        # bundled esp-prog2.bin (ESP-Prog-2's own firmware) + README
 ├── tools/           # pyOCD config + notes on flashing prerequisites
 ├── scripts/         # build.ps1 / build.sh — PyInstaller one-file build
