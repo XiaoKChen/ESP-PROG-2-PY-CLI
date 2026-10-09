@@ -39,7 +39,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="esp-prog2-flasher",
         description="Flash the RA4M1 bootloader (and, once flashed, an application .bin) "
-        "through an ESP-Prog-2 (CMSIS-DAP), or reflash the ESP-Prog-2's own firmware. With "
+        "or the PSoC 6 (IDU Radar) full image, through an ESP-Prog-2 (CMSIS-DAP), or reflash "
+        "the ESP-Prog-2's own firmware. With "
         "no options, launches the interactive TUI.",
     )
     p.add_argument(
