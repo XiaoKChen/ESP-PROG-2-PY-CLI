@@ -1,6 +1,6 @@
 [project]
 name = "esp-prog2-flasher"
-version = "2.1.2"
+version = "2.2.0"
 description = "TUI/CLI flasher for the RA4M1 (UNO R4 Minima) bootloader via an ESP-Prog-2 (CMSIS-DAP)"
 readme = "README.md"
 requires-python = ">=3.12"
