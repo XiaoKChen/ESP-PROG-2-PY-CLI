@@ -9,11 +9,12 @@ device support pack.
 
 1. **pyOCD** — installed as a project dependency. Run via `uv run`.
 2. **The `r7fa4m1ab` CMSIS device pack** — pyOCD uses it to know the RA4M1's
-   flash layout. It is usually already present. If `--detect` reports the target
-   type is unknown, install it once:
+   flash layout. A slim copy ships in the repo (`packs/`) and is bundled into
+   the standalone binary, so the app needs no `pyocd pack install` step. For
+   bare `pyocd` CLI use (this `pyocd.yaml`), point pyOCD at it explicitly:
 
    ```sh
-   uv run pyocd pack install r7fa4m1ab
+   uv run pyocd flash --pack packs/Renesas.RA_DFP.slim.pack -t r7fa4m1ab hex/dfu_minima.hex
    ```
 
 3. **The ESP-Prog-2 probe**, enumerated as a CMSIS-DAP device

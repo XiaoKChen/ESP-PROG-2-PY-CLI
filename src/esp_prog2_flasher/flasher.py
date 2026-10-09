@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
+    from intelhex import IntelHex
     from pyocd.core.session import Session
     from pyocd.probe.debug_probe import DebugProbe
 
@@ -34,6 +35,8 @@ ESP_PROG_VID = 0x303A
 ESP_PROG_PID = 0x1002
 # Renesas RA4M1 (Arduino UNO R4 Minima MCU) — pyOCD pack target name.
 TARGET_TYPE = "r7fa4m1ab"
+# Infineon PSoC 6 (CY8C6245 / PSoC 62S3) — built into pyOCD, no CMSIS pack needed.
+PSOC6_TARGET_TYPE: Final[str] = "cy8c6xx5"
 DEFAULT_FREQUENCY_HZ = 1_000_000
 DEFAULT_BAUD_RATE: Final[int] = 921600
 # Hidden dispatch flag: when a frozen (PyInstaller) build re-execs itself to run
@@ -42,6 +45,11 @@ DEFAULT_BAUD_RATE: Final[int] = 921600
 ESPTOOL_SHIM_FLAG: Final[str] = "--esptool-shim"
 
 _HEX_NAME = "dfu_minima.hex"
+_PSOC6_HEX_NAME = "psoc6_radar_full_image.hex"
+# Slim Renesas.RA_DFP CMSIS pack (pdsc + RA4M1 flash algorithms only) bundled so
+# pyOCD can resolve the r7fa4m1ab target offline — without the pack first being
+# downloaded into the user's ~/.pyocd cache via `pyocd pack install`. See packs/.
+_PACK_NAME = "Renesas.RA_DFP.slim.pack"
 # A blank Cortex-M reads this in PC after reset (vector table = 0xFFFFFFFF).
 _BLANK_PC = 0xFFFFFFFE
 _PC_ADDRESS_MASK: Final[int] = 0xFFFFFFFE
@@ -58,6 +66,15 @@ _DOWNLOAD_TIMEOUT_S: Final[int] = 60
 # memory_regions.ld — confirming this bootloader was built from that exact
 # linker layout.
 APP_BASE_ADDRESS: Final[int] = 0x4000
+
+# PSoC 62S3 main flash (512 KiB). Only this range is ever programmed — never
+# SFLASH (0x16000000) or eFuse.
+PSOC6_FLASH_START: Final[int] = 0x10000000
+PSOC6_FLASH_END: Final[int] = 0x10080000
+# Cypress/Infineon hex files carry programming metadata (checksum, chip
+# protection) as pseudo-sections up here; they are not target memory.
+PSOC6_METADATA_START: Final[int] = 0x90000000
+PSOC6_METADATA_END: Final[int] = 0xA0000000
 
 ProgressCallback = Callable[[float], None]
 LogCallback = Callable[[str], None]
@@ -100,6 +117,18 @@ def _find_bundled(*parts: str) -> Path | None:
 def find_default_hex() -> Path | None:
     """Locate the bundled ``hex/dfu_minima.hex`` regardless of how we were launched."""
     return _find_bundled("hex", _HEX_NAME)
+
+
+def find_default_psoc6_hex() -> Path | None:
+    """Locate the bundled ``hex/psoc6_radar_full_image.hex`` (bootloader + App1)."""
+    return _find_bundled("hex", _PSOC6_HEX_NAME)
+
+
+def find_default_pack() -> Path | None:
+    """Locate the bundled slim RA_DFP CMSIS pack, which defines the r7fa4m1ab
+    target and its flash algorithm so the RA4M1 can be flashed without the pack
+    first being installed into the user's cmsis-pack-manager cache."""
+    return _find_bundled("packs", _PACK_NAME)
 
 
 @dataclass(frozen=True)
@@ -189,23 +218,50 @@ def find_esp_prog() -> ProbeInfo | None:
     return _to_info(probe) if probe is not None else None
 
 
-def _open_session(probe: DebugProbe, frequency: int) -> Session:
+def _open_session(
+    probe: DebugProbe,
+    frequency: int,
+    target_type: str = TARGET_TYPE,
+    use_pack: bool = True,
+) -> Session:
     from pyocd.core.session import Session
 
-    return Session(
-        probe,
-        options={"target_override": TARGET_TYPE, "frequency": frequency},
-    )
+    options: dict[str, object] = {"target_override": target_type, "frequency": frequency}
+    # Point pyOCD at the bundled pack when present so r7fa4m1ab resolves offline.
+    # Absent (e.g. a plain `uv run` dev checkout), pyOCD falls back to the pack
+    # installed in the user's cmsis-pack-manager cache, preserving old behaviour.
+    # Built-in targets (PSoC 6) pass use_pack=False.
+    pack = find_default_pack() if use_pack else None
+    if pack is not None:
+        options["pack"] = [str(pack)]
+    return Session(probe, options=options)
 
 
 def detect(unique_id: str | None = None, frequency: int = DEFAULT_FREQUENCY_HZ) -> DetectResult:
     """Detect the ESP-Prog-2 and whether an RA4M1 target is reachable through it."""
+    return _detect_target(unique_id, frequency, TARGET_TYPE, "RA4M1", use_pack=True)
+
+
+def detect_psoc6(
+    unique_id: str | None = None, frequency: int = DEFAULT_FREQUENCY_HZ
+) -> DetectResult:
+    """Detect the ESP-Prog-2 and whether a PSoC 6 target is reachable through it."""
+    return _detect_target(unique_id, frequency, PSOC6_TARGET_TYPE, "PSoC 6", use_pack=False)
+
+
+def _detect_target(
+    unique_id: str | None,
+    frequency: int,
+    target_type: str,
+    label: str,
+    use_pack: bool,
+) -> DetectResult:
     probe = _choose_raw(unique_id)
     if probe is None:
         return DetectResult(TargetState.NO_PROBE, "No ESP-Prog-2 / CMSIS-DAP probe connected.")
 
     info = _to_info(probe)
-    session = _open_session(probe, frequency)
+    session = _open_session(probe, frequency, target_type, use_pack)
     try:
         session.open()  # examines the DP and the Cortex-M core
         target = session.target
@@ -216,25 +272,25 @@ def detect(unique_id: str | None = None, frequency: int = DEFAULT_FREQUENCY_HZ) 
             if blank:
                 return DetectResult(
                     TargetState.CONNECTED_BLANK,
-                    f"RA4M1 connected via {info.unique_id} — flash is blank/unprogrammed "
+                    f"{label} connected via {info.unique_id} — flash is blank/unprogrammed "
                     f"(pc=0x{pc:08x}). Ready to flash.",
                     info,
                 )
             return DetectResult(
                 TargetState.CONNECTED,
-                f"RA4M1 connected via {info.unique_id} (pc=0x{pc:08x}).",
+                f"{label} connected via {info.unique_id} (pc=0x{pc:08x}).",
                 info,
             )
         except Exception:
             # Core examined but could not be halted/read — still present and flashable.
             logger.debug("core halt/read failed for %s", info.unique_id, exc_info=True)
             return DetectResult(
-                TargetState.CONNECTED, f"RA4M1 connected via {info.unique_id}.", info
+                TargetState.CONNECTED, f"{label} connected via {info.unique_id}.", info
             )
     except Exception as exc:  # noqa: BLE001 — surface any link/examine failure as "no target"
         return DetectResult(
             TargetState.NO_TARGET,
-            f"Probe {info.unique_id} found, but no RA4M1 target responded over SWD "
+            f"Probe {info.unique_id} found, but no {label} target responded over SWD "
             f"({type(exc).__name__}). Check wiring and target power.",
             info,
         )
@@ -355,6 +411,76 @@ def flash_app(
         # bootloader region below base_address is never erased or written.
         programmer = FileProgrammer(session, progress=progress, chip_erase="sector")
         programmer.program(str(bin_path), file_format="bin", base_address=base_address)
+        _log("Resetting target")
+        session.target.reset()
+        _log("Done.")
+    finally:
+        try:
+            session.close()
+        except Exception:
+            logger.debug("session close failed for %s", probe.unique_id, exc_info=True)
+
+
+def psoc6_flash_segments(image: IntelHex) -> list[tuple[int, bytes]]:
+    """Return the ``(address, data)`` segments of ``image`` that belong in PSoC 6 main flash.
+
+    Cypress programming-metadata pseudo-sections are dropped; any other data
+    outside main flash (SFLASH, eFuse, ...) is refused rather than written.
+    """
+    segments: list[tuple[int, bytes]] = []
+    for start, end in image.segments():
+        if PSOC6_METADATA_START <= start < PSOC6_METADATA_END:
+            logger.info("Dropping Cypress metadata section 0x%08X-0x%08X", start, end)
+            continue
+        if not (start >= PSOC6_FLASH_START and end <= PSOC6_FLASH_END):
+            raise FlasherError(
+                f"Hex data at 0x{start:08X}-0x{end:08X} is outside PSoC 6 main flash "
+                f"(0x{PSOC6_FLASH_START:08X}-0x{PSOC6_FLASH_END:08X}); refusing to flash."
+            )
+        segments.append((start, bytes(image.tobinarray(start=start, end=end - 1))))
+    if not segments:
+        raise FlasherError("Hex file contains no data in PSoC 6 main flash.")
+    return segments
+
+
+def flash_psoc6(
+    hex_path: Path,
+    unique_id: str | None = None,
+    frequency: int = DEFAULT_FREQUENCY_HZ,
+    progress: ProgressCallback | None = None,
+    log: LogCallback | None = None,
+) -> None:
+    """Program ``hex_path`` to a PSoC 6 target's main flash and reset. Raises on failure."""
+    from intelhex import IntelHex
+    from pyocd.flash.loader import FlashLoader
+
+    hex_path = Path(hex_path)
+    if not hex_path.is_file():
+        raise FileNotFoundError(f"Firmware file not found: {hex_path}")
+
+    # Fail fast on out-of-range data before touching hardware.
+    segments = psoc6_flash_segments(IntelHex(str(hex_path)))
+
+    def _log(msg: str) -> None:
+        if log is not None:
+            log(msg)
+
+    probe = _choose_raw(unique_id)
+    if probe is None:
+        raise ProbeNotFoundError("No ESP-Prog-2 / CMSIS-DAP probe connected.")
+
+    _log(f"Opening {PSOC6_TARGET_TYPE} via {probe.unique_id} @ {frequency // 1000} kHz")
+    session = _open_session(probe, frequency, PSOC6_TARGET_TYPE, use_pack=False)
+    session.open()
+    try:
+        _log("Reset/halt target")
+        session.target.reset_and_halt()
+        total = sum(len(data) for _, data in segments)
+        _log(f"Programming {hex_path.name} ({total} bytes in {len(segments)} segments)")
+        loader = FlashLoader(session, progress=progress)
+        for address, data in segments:
+            loader.add_data(address, data)
+        loader.commit()
         _log("Resetting target")
         session.target.reset()
         _log("Done.")

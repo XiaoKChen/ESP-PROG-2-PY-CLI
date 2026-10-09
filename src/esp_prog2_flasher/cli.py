@@ -39,7 +39,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="esp-prog2-flasher",
         description="Flash the RA4M1 bootloader (and, once flashed, an application .bin) "
-        "through an ESP-Prog-2 (CMSIS-DAP), or reflash the ESP-Prog-2's own firmware. With "
+        "or the PSoC 6 (IDU Radar) full image, through an ESP-Prog-2 (CMSIS-DAP), or reflash "
+        "the ESP-Prog-2's own firmware. With "
         "no options, launches the interactive TUI.",
     )
     p.add_argument(
@@ -50,6 +51,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--flash", action="store_true", help="Flash the RA4M1 bootloader headlessly, then exit."
+    )
+    p.add_argument(
+        "--psoc6",
+        action="store_true",
+        help="With --detect: look for a PSoC 6 target (IDU Radar) instead of the RA4M1.",
+    )
+    p.add_argument(
+        "--flash-psoc6",
+        action="store_true",
+        help="Flash the PSoC 6 (CY8C6245) main flash over SWD, then exit (default: bundled "
+        "hex/psoc6_radar_full_image.hex; override with --hex).",
     )
     p.add_argument(
         "--flash-app",
@@ -85,7 +97,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--hex",
         type=Path,
         default=None,
-        help="Path to the RA4M1 .hex (default: bundled hex/dfu_minima.hex).",
+        help="Path to the .hex for --flash (default: bundled hex/dfu_minima.hex) or "
+        "--flash-psoc6 (default: bundled hex/psoc6_radar_full_image.hex).",
     )
     p.add_argument(
         "--probe-bin",
@@ -270,7 +283,8 @@ def main() -> None:
         return
 
     if args.detect:
-        result = flasher.detect(frequency=args.freq)
+        detect = flasher.detect_psoc6 if args.psoc6 else flasher.detect
+        result = detect(frequency=args.freq)
         print(result.detail)
         sys.exit(0 if result.state is not TargetState.NO_PROBE else 2)
 
@@ -295,6 +309,19 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             logger.exception("Application flash failed")
             print(f"Application flash failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.flash_psoc6:
+        hex_path = args.hex or flasher.find_default_psoc6_hex()
+        if hex_path is None:
+            print("No firmware specified and no bundled PSoC 6 hex found.", file=sys.stderr)
+            sys.exit(2)
+        try:
+            flasher.flash_psoc6(hex_path, frequency=args.freq, log=print)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("PSoC 6 flash failed")
+            print(f"PSoC 6 flash failed: {exc}", file=sys.stderr)
             sys.exit(1)
         return
 

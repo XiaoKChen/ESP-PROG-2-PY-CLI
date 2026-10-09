@@ -36,21 +36,23 @@ drive**.
 
 ## Rebuilding it
 
-Built in Docker (toolchain bundled — sidesteps the native toolchain-download TLS
-failure and the spaces in the repo path) from a clean clone at `C:\esp\esp-usb-bridge`:
+The source lives on the **`esp-prog2-swd-no-msc`** branch of the fork
+[XiaoKChen/esp-usb-bridge](https://github.com/XiaoKChen/esp-usb-bridge) — upstream
+esp-usb-bridge plus the MSC removal and a CMSIS-DAPv2 interface-subclass fix
+(pyOCD only accepts `bInterfaceSubClass == 0`, so SWD builds drop the Espressif
+USB-JTAG identifiers in `eub_vendord.h`).
+
+Clone the branch, then build in Docker (toolchain bundled — sidesteps the native
+toolchain-download TLS failure and the spaces in a repo path):
 
 ```sh
+git clone -b esp-prog2-swd-no-msc https://github.com/XiaoKChen/esp-usb-bridge.git C:\esp\esp-usb-bridge
 docker run --rm -v C:\esp\esp-usb-bridge:/project -w /project espressif/idf:release-v5.3 \
   bash -c "git config --global --add safe.directory /project; \
     SDKCONFIG_DEFAULTS='sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.defaults.esp_prog2;sdkconfig.swd.defaults' \
     idf.py set-target esp32s3 build merge-bin"
 # result: build/merged-binary.bin  ->  copied here as esp-prog2.bin
 ```
-
-Source edits for the MSC removal (in the clone): `tusb_config.h` `CFG_TUD_MSC 0`;
-`usb_defs.h` drop `ITF_NUM_MSC`; `main.c` drop `TUD_MSC_DESC_LEN`, the
-`TUD_MSC_DESCRIPTOR` line, `msc_init()`, and the `msc.h` include; `main/CMakeLists.txt`
-drop `msc.c`.
 
 ## The official image
 
