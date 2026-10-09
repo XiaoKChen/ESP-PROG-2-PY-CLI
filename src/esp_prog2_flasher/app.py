@@ -166,8 +166,8 @@ class FlasherApp(App):
     }
     #target_panel { margin: 0 1 0 0; }
     #right_column { width: 1fr; height: auto; }
-    #app_panel { margin: 1 0 0 0; }
-    #probe_status, #target_status, #serial_status, #fw_status, #app_status {
+    #app_panel, #psoc6_panel { margin: 1 0 0 0; }
+    #probe_status, #target_status, #serial_status, #fw_status, #app_status, #psoc6_status {
         height: auto; padding: 0 0 1 0;
     }
     .ok { color: $success; text-style: bold; }
@@ -176,7 +176,7 @@ class FlasherApp(App):
     .row { height: auto; padding: 1 0 0 0; }
     .row Label { padding: 1 1 0 0; width: auto; }
     .row Button { margin: 0 1 0 0; }
-    #hex_input, #app_input { width: 1fr; margin: 0 1 0 0; }
+    #hex_input, #app_input, #psoc6_input { width: 1fr; margin: 0 1 0 0; }
     #boot_cmd_input, #boot_reply_input { width: 1fr; }
     #footer_row { height: auto; padding: 1 2; align: left middle; }
     #progress { width: 1fr; margin: 0 2 0 0; }
@@ -194,6 +194,7 @@ class FlasherApp(App):
         ("d", "detect", "Detect"),
         ("f", "flash_target", "Flash target"),
         ("a", "flash_app", "Flash app"),
+        ("6", "flash_psoc6", "Flash PSoC 6"),
         ("p", "flash_probe", "Flash probe"),
         ("u", "update_fw", "Update fw"),
         ("q", "quit", "Quit"),
@@ -205,6 +206,8 @@ class FlasherApp(App):
         self._detect: DetectResult | None = None
         default = hex_path or flasher.find_default_hex()
         self._default_hex = str(default) if default else ""
+        psoc6_default = flasher.find_default_psoc6_hex()
+        self._default_psoc6_hex = str(psoc6_default) if psoc6_default else ""
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -267,6 +270,21 @@ class FlasherApp(App):
                         yield Checkbox("Embassy bootloader", id="embassy_checkbox")
                     with Horizontal(classes="row"):
                         yield Button("Flash app", id="flash_app", variant="success", disabled=True)
+                with Vertical(id="psoc6_panel", classes="panel"):
+                    yield Static(
+                        "PSoC 6 (IDU Radar) main flash, programmed over SWD.",
+                        id="psoc6_status",
+                    )
+                    with Horizontal(classes="row"):
+                        yield Label("PSoC 6 (.hex):")
+                        yield Input(
+                            value=self._default_psoc6_hex,
+                            placeholder="path to PSoC 6 .hex",
+                            id="psoc6_input",
+                        )
+                        yield Button("Browse", id="browse_psoc6")
+                    with Horizontal(classes="row"):
+                        yield Button("Flash PSoC 6", id="flash_psoc6", variant="success")
 
         with Horizontal(id="footer_row"):
             yield ProgressBar(total=100, show_eta=False, id="progress")
@@ -278,6 +296,7 @@ class FlasherApp(App):
         self.query_one("#target_panel").border_title = "Target (RA4M1 / UNO R4 Minima)"
         self.query_one("#probe_panel").border_title = "ESP-Prog-2 firmware (ESP32-S3)"
         self.query_one("#app_panel").border_title = "Application (RA4M1 over SWD)"
+        self.query_one("#psoc6_panel").border_title = "PSoC 6 (IDU Radar over SWD)"
         self.query_one("#log", RichLog).border_title = "Log"
         # Custom-name input is revealed only when "Custom…" is selected.
         self.query_one("#custom_name_row").display = False
@@ -421,6 +440,28 @@ class FlasherApp(App):
         self._log(f"[b]Flashing application[/b] {bin_path.name} …")
         self.flash_app_worker(bin_path, base_address)
 
+    def action_flash_psoc6(self) -> None:
+        hex_path = Path(self.query_one("#psoc6_input", Input).value.strip())
+        if not hex_path.is_file():
+            self._log(f"[red]PSoC 6 hex not found:[/red] {hex_path}")
+            return
+        self._busy(True)
+        self._set_progress(0)
+        self._log(f"[b]Flashing PSoC 6[/b] {hex_path.name} …")
+        self.flash_psoc6_worker(hex_path)
+
+    def action_browse_psoc6(self) -> None:
+        current = self.query_one("#psoc6_input", Input).value
+        start = Path(current).expanduser().parent if current else Path.cwd()
+        if not start.is_dir():
+            start = Path.cwd()
+
+        def apply_choice(chosen: Path | None) -> None:
+            if chosen is not None:
+                self.query_one("#psoc6_input", Input).value = str(chosen)
+
+        self.push_screen(FilePickerScreen(start, ".hex", "Select PSoC 6 .hex"), apply_choice)
+
     def action_browse_app(self) -> None:
         current = self.query_one("#app_input", Input).value
         start = Path(current).expanduser().parent if current else Path.cwd()
@@ -469,10 +510,12 @@ class FlasherApp(App):
             "detect": self.action_detect,
             "flash_target": self.action_flash_target,
             "flash_app": self.action_flash_app,
+            "flash_psoc6": self.action_flash_psoc6,
             "flash_probe": self.action_flash_probe,
             "update_fw": self.action_update_fw,
             "browse_hex": self.action_browse_hex,
             "browse_app": self.action_browse_app,
+            "browse_psoc6": self.action_browse_psoc6,
             "quit": self.exit,
         }.get(event.button.id)
         if handler:
@@ -528,6 +571,20 @@ class FlasherApp(App):
         except Exception as exc:  # noqa: BLE001
             logger.exception("Flash app worker failed")
             self.call_from_thread(self._flash_done, False, f"Application flash failed: {exc!r}")
+
+    @work(thread=True, exclusive=True, group="flash")
+    def flash_psoc6_worker(self, hex_path: Path) -> None:
+        try:
+            flasher.flash_psoc6(
+                hex_path,
+                frequency=self._frequency,
+                progress=lambda f: self.call_from_thread(self._set_progress, f * 100.0),
+                log=lambda m: self.call_from_thread(self._log, m),
+            )
+            self.call_from_thread(self._flash_done, True, "PSoC 6 flashed and reset.")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Flash PSoC 6 worker failed")
+            self.call_from_thread(self._flash_done, False, f"PSoC 6 flash failed: {exc!r}")
 
     @work(thread=True, exclusive=True, group="flash")
     def flash_probe_worker(self, fw: Path, port: str) -> None:
@@ -620,7 +677,14 @@ class FlasherApp(App):
         self._log(f"[{'green' if ok else 'red'}]{message}[/]")
 
     def _busy(self, busy: bool) -> None:
-        for bid in ("detect", "flash_target", "flash_app", "flash_probe", "update_fw"):
+        for bid in (
+            "detect",
+            "flash_target",
+            "flash_app",
+            "flash_psoc6",
+            "flash_probe",
+            "update_fw",
+        ):
             btn = self.query_one(f"#{bid}", Button)
             if bid in ("flash_target", "flash_app"):
                 btn.disabled = busy or not (self._detect and self._detect.flashable)
