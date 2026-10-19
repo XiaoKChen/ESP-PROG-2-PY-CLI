@@ -1,17 +1,21 @@
 """Command-line entry point: headless flash/detect flags, or the Textual TUI when run bare.
 
 Parses arguments with argparse and drives flasher.py for the RA4M1 bootloader, application
-and DFU config block, the PSoC 6 image, and the ESP-Prog-2's own firmware. With no flags it
-launches the TUI in app.py.
+and DFU config block, the PSoC 6 image, the ESP-Prog-2's own firmware, and the DFU config
+block of an ESP32-S3 CAN node (--provision-node / --read-node-config, over the node's own
+port). With no flags it launches the TUI in app.py.
 
 Owns:        the flag set and the interactive/headless DFU-config resolution (names plus boot
              CAN ID pair); the hidden ESPTOOL_SHIM_FLAG dispatch that lets a frozen build
              re-exec itself as esptool.
-Not here:    the flashing engine (flasher.py), the TUI (app.py), config-block encoding and the
-             device/CAN-ID table (dfu_config.py).
-Errors:      invalid or conflicting arguments exit with code 2; a failed flash or download
-             logs the exception, prints to stderr and exits with code 1; --detect exits 2 only
-             when no probe is found, otherwise 0.
+Not here:    the flashing engine (flasher.py), the TUI (app.py), config-block encoding/decoding
+             and the device/CAN-ID table (dfu_config.py).
+Invariants:  the node flags never auto-detect a port — auto-detect finds the ESP-Prog-2, not
+             the node — so --port is mandatory for them.
+Errors:      invalid or conflicting arguments exit with code 2; a failed flash, download or
+             node read logs the exception, prints to stderr and exits with code 1; --detect
+             exits 2 only when no probe is found, otherwise 0; --read-node-config exits 0 for
+             both a provisioned and an unprovisioned node.
 Depends on:  flasher.py, dfu_config.py, and app.py (imported lazily, only for the TUI).
 See also:    __main__.py, tests/test_dfu_config.py
 """
@@ -123,7 +127,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to the ESP-Prog-2 firmware (default: bundled firmware/esp-prog2.bin).",
     )
     p.add_argument(
-        "--port", default=None, help="Serial port for --flash-probe (default: auto-detect)."
+        "--provision-node",
+        action="store_true",
+        help="Write the DFU config block (--product required; --manufacturer, --boot-cmd-id/"
+        "--boot-reply-id as for --flash) to an ESP32-S3 CAN node's cancfg partition via "
+        "esptool, verify it by read-back, then exit. Requires --port (the node's port).",
+    )
+    p.add_argument(
+        "--read-node-config",
+        action="store_true",
+        help="Read and print the DFU config block from an ESP32-S3 CAN node's cancfg "
+        "partition, then exit. Requires --port (the node's port).",
+    )
+    p.add_argument(
+        "--port",
+        default=None,
+        help="Serial port for --flash-probe (default: auto-detect), or the CAN node's port "
+        "for --provision-node/--read-node-config (required there, never auto-detected).",
     )
     p.add_argument(
         "--manufacturer",
@@ -167,6 +187,66 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"SWD clock in Hz for target flashing (default: {flasher.DEFAULT_FREQUENCY_HZ}).",
     )
     return p
+
+
+def _exit_if_boot_ids_unpaired(boot_cmd_id: int | None, boot_reply_id: int | None) -> None:
+    if (boot_cmd_id is None) != (boot_reply_id is None):
+        print(
+            "--boot-cmd-id and --boot-reply-id must be given together (or both omitted).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _provision_node(args: argparse.Namespace) -> None:
+    """Handle --provision-node: resolve the config like --flash, then write it to the node."""
+    if args.product is None:
+        print(
+            "--provision-node requires --product (the device name the node reports).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    _exit_if_boot_ids_unpaired(args.boot_cmd_id, args.boot_reply_id)
+    manufacturer, product, boot_cmd_id, boot_reply_id = _resolve_dfu_config(
+        args.manufacturer, args.product, args.boot_cmd_id, args.boot_reply_id
+    )
+    # A product is given, so _resolve_dfu_config always returns both names.
+    assert manufacturer is not None and product is not None
+    try:
+        flasher.provision_node(
+            args.port,
+            manufacturer,
+            product,
+            boot_cmd_id=boot_cmd_id,
+            boot_reply_id=boot_reply_id,
+            log=print,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Node provisioning failed")
+        print(f"Node provisioning failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _read_node_config(port: str) -> None:
+    """Handle --read-node-config: print the node's decoded config block."""
+    try:
+        config = flasher.read_node_config(port, log=print)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Node config read failed")
+        print(f"Node config read failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if config is None:
+        print(
+            "Node config: unprovisioned/invalid (node uses defaults "
+            f"0x{DEFAULT_BOOT_CMD_ID:03X}/0x{DEFAULT_BOOT_REPLY_ID:03X})"
+        )
+        return
+    print(f"Manufacturer: {config.manufacturer}")
+    print(f"Product:      {config.product}")
+    print(
+        f"Boot CAN IDs: host->boot=0x{config.boot_cmd_id:03X} "
+        f"boot->host=0x{config.boot_reply_id:03X}"
+    )
 
 
 def _resolve_dfu_config(
@@ -358,17 +438,26 @@ def main() -> None:
             sys.exit(1)
         return
 
+    if args.provision_node or args.read_node_config:
+        if not args.port:
+            print(
+                "--provision-node/--read-node-config require --port (the node's serial port); "
+                "it is not auto-detected because auto-detect finds the ESP-Prog-2, not the node.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if args.provision_node:
+            _provision_node(args)
+        else:
+            _read_node_config(args.port)
+        return
+
     if args.flash:
         hex_path = args.hex or flasher.find_default_hex()
         if hex_path is None:
             print("No firmware specified and no bundled hex found.", file=sys.stderr)
             sys.exit(2)
-        if (args.boot_cmd_id is None) != (args.boot_reply_id is None):
-            print(
-                "--boot-cmd-id and --boot-reply-id must be given together (or both omitted).",
-                file=sys.stderr,
-            )
-            sys.exit(2)
+        _exit_if_boot_ids_unpaired(args.boot_cmd_id, args.boot_reply_id)
         manufacturer, product, boot_cmd_id, boot_reply_id = _resolve_dfu_config(
             args.manufacturer, args.product, args.boot_cmd_id, args.boot_reply_id
         )

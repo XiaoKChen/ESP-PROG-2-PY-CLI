@@ -116,6 +116,9 @@ uv run esp-prog2-flasher --flash-probe       # flash the bundled SWD firmware (n
 uv run esp-prog2-flasher --flash-probe --port COM110
 uv run esp-prog2-flasher --flash-probe --probe-bin path/to/other.bin
 uv run esp-prog2-flasher --update-probe-fw   # fetch official JTAG image as esp-prog2-official-jtag.bin (reference)
+
+uv run esp-prog2-flasher --provision-node --port COM7 --product "IDU Radar"   # ESP32-S3 CAN node config (see below)
+uv run esp-prog2-flasher --read-node-config --port COM7
 ```
 
 `--freq <hz>` overrides the SWD clock for target flashing (default 1 MHz).
@@ -157,6 +160,33 @@ ESP-Prog-2 using pyOCD's built-in `cy8c6xx5` target (no CMSIS pack needed).
   out-of-range data (e.g. SFLASH, eFuse) aborts the flash before touching hardware.
 
 ![TUI after flashing the bundled PSoC 6 image](docs/images/tui-psoc6.png)
+
+## ESP32-S3 CAN node config (CLI only)
+
+ESP32-S3 CAN nodes running `node_updater` read the same 80-byte device config
+block as the RA4M1 bootloader (manufacturer, product name, boot CAN ID pair)
+from their `cancfg` data partition. This is written with esptool over the
+**node's own** serial/USB download port, not through the ESP-Prog-2, so
+`--port` is required and never auto-detected.
+
+```sh
+# Known device: CAN IDs come from the board table.
+uv run esp-prog2-flasher --provision-node --port COM7 --product "IDU Radar"
+# Custom device with its own CAN ID pair.
+uv run esp-prog2-flasher --provision-node --port COM7 --product "My Node" --boot-cmd-id 0x700 --boot-reply-id 0x711
+# Read back and decode what the node will use.
+uv run esp-prog2-flasher --read-node-config --port COM7
+```
+
+- `--provision-node` needs `--product` and takes `--manufacturer`,
+  `--boot-cmd-id` and `--boot-reply-id` with the same rules as `--flash`. It
+  writes the block, reads it back and fails if any byte differs.
+- The `cancfg` offset comes from the node's partition table at `0x8000`.
+  With no valid table there (e.g. blank flash) it falls back to `0x11000`. A
+  valid table without a `cancfg` partition is an error, because the node
+  firmware would never read a block written anywhere else.
+- `--read-node-config` prints the manufacturer, product and CAN IDs, or
+  `unprovisioned/invalid (node uses defaults 0x79E/0x79F)`.
 
 ## What it does
 
