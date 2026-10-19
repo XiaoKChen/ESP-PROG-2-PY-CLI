@@ -46,13 +46,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # The ESP-Prog-2 enumerates as a CMSIS-DAP device on Espressif's USB vendor ID.
-ESP_PROG_VID = 0x303A
-ESP_PROG_PID = 0x1002
+ESP_PROG_VID: Final[int] = 0x303A
+ESP_PROG_PID: Final[int] = 0x1002
 # Renesas RA4M1 (Arduino UNO R4 Minima MCU) — pyOCD pack target name.
-TARGET_TYPE = "r7fa4m1ab"
+TARGET_TYPE: Final[str] = "r7fa4m1ab"
 # Infineon PSoC 6 (CY8C6245 / PSoC 62S3) — built into pyOCD, no CMSIS pack needed.
 PSOC6_TARGET_TYPE: Final[str] = "cy8c6xx5"
-DEFAULT_FREQUENCY_HZ = 1_000_000
+DEFAULT_FREQUENCY_HZ: Final[int] = 1_000_000
 DEFAULT_BAUD_RATE: Final[int] = 921600
 # Hidden dispatch flag: when a frozen (PyInstaller) build re-execs itself to run
 # esptool, cli.py intercepts this as argv[1] and calls esptool.main() in-process
@@ -66,7 +66,7 @@ _PSOC6_HEX_NAME = "psoc6_radar_full_image.hex"
 # downloaded into the user's ~/.pyocd cache via `pyocd pack install`. See packs/.
 _PACK_NAME = "Renesas.RA_DFP.slim.pack"
 # A blank Cortex-M reads this in PC after reset (vector table = 0xFFFFFFFF).
-_BLANK_PC = 0xFFFFFFFE
+_BLANK_PC: Final[int] = 0xFFFFFFFE
 _PC_ADDRESS_MASK: Final[int] = 0xFFFFFFFE
 _DOWNLOAD_TIMEOUT_S: Final[int] = 60
 
@@ -146,7 +146,7 @@ def find_default_pack() -> Path | None:
     return _find_bundled("packs", _PACK_NAME)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ProbeInfo:
     """Display-friendly snapshot of a connected debug probe."""
 
@@ -168,7 +168,7 @@ class TargetState(Enum):
     CONNECTED_BLANK = auto()
 
 
-@dataclass
+@dataclass(slots=True)
 class DetectResult:
     state: TargetState
     detail: str
@@ -613,9 +613,9 @@ def write_dfu_config(
 # firmware/esp-prog2.bin is instead a locally-built SWD/CMSIS-DAP + MSC-disabled
 # variant (see firmware/README.md). So the official download is saved under a
 # separate name and never overwrites the bundled SWD build.
-PROBE_FIRMWARE_URL = "https://espressif.github.io/esp-usb-bridge/esp-prog2.bin"
-PROBE_CHIP = "esp32s3"
-PROBE_FLASH_OFFSET = "0x0"  # merged image: bootloader + partition table + app
+PROBE_FIRMWARE_URL: Final[str] = "https://espressif.github.io/esp-usb-bridge/esp-prog2.bin"
+PROBE_CHIP: Final[str] = "esp32s3"
+PROBE_FLASH_OFFSET: Final[str] = "0x0"  # merged image: bootloader + partition table + app
 _PROBE_BIN_NAME = "esp-prog2.bin"
 _OFFICIAL_BIN_NAME = "esp-prog2-official-jtag.bin"
 
