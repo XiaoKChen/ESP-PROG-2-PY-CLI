@@ -346,9 +346,10 @@ def main() -> None:
         if fw is None:
             print("No esp-prog2.bin found. Run --update-probe-fw first.", file=sys.stderr)
             sys.exit(2)
-        port = args.port or (
-            flasher.find_probe_serial().device if flasher.find_probe_serial() else None
-        )
+        port = args.port
+        if not port:
+            probe_serial = flasher.find_probe_serial()
+            port = probe_serial.device if probe_serial else None
         try:
             flasher.flash_probe(fw, port=port, log=print)
         except Exception as exc:  # noqa: BLE001

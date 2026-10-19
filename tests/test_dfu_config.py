@@ -53,8 +53,8 @@ def test_golden_vector_with_ids() -> None:
     # Hand-computed golden vector (CRC 0x529C5DBF over the first 76 bytes).
     expected = bytes.fromhex(
         "df0f0cdf020408ff"
-        "41636d65" + "ff" * 28  # "Acme" + pad
-        + "5769646765742d31" + "ff" * 24  # "Widget-1" + pad
+        + ("41636d65" + "ff" * 28)  # "Acme" + pad
+        + ("5769646765742d31" + "ff" * 24)  # "Widget-1" + pad
         + "00070107"  # boot_cmd_id=0x0700, boot_reply_id=0x0701 (LE u16 each)
         + "bf5d9c52"  # crc32 little-endian
     )
@@ -66,8 +66,8 @@ def test_golden_vector_ids_unset() -> None:
     # Hand-computed golden vector (CRC 0x0E17CF3B over the first 76 bytes).
     expected = bytes.fromhex(
         "df0f0cdf020408ff"
-        "41636d65" + "ff" * 28  # "Acme" + pad
-        + "5769646765742d31" + "ff" * 24  # "Widget-1" + pad
+        + ("41636d65" + "ff" * 28)  # "Acme" + pad
+        + ("5769646765742d31" + "ff" * 24)  # "Widget-1" + pad
         + "ffffffff"  # boot_cmd_id=0xFFFF, boot_reply_id=0xFFFF (unset)
         + "3bcf170e"  # crc32 little-endian
     )
