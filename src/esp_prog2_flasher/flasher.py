@@ -31,7 +31,11 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
+import subprocess
 import sys
+import time
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -535,8 +539,6 @@ def _program_config_block(session: Session, block: bytes, log: LogCallback) -> N
     """Program ``block`` to the DFU config address via the flash algorithm and
     read-back-verify. Assumes the target is already halted in this ``session``.
     """
-    import time
-
     from pyocd.flash.loader import FlashLoader
 
     from .dfu_config import CONFIG_ADDRESS, DATA_FLASH_ENABLE_ADDR
@@ -657,8 +659,6 @@ def download_probe_firmware(dest: Path | None = None, log: LogCallback | None = 
     with mass storage — flashing it will disable SWD/CMSIS-DAP and re-add the MSC
     drive, so only use it deliberately (via --probe-bin).
     """
-    import urllib.request
-
     # Use the OS trust store so corporate TLS interception doesn't break the
     # download (Python's bundled certifi often lacks the local root CA).
     try:
@@ -699,9 +699,6 @@ def flash_probe(
     The board must be in ROM download mode (hold BOOT, tap RESET) — the running
     bridge firmware does not expose a self-reflash path on its CDC port.
     """
-    import re
-    import subprocess
-
     bin_path = Path(bin_path)
     if not bin_path.is_file():
         raise FileNotFoundError(f"Firmware file not found: {bin_path}")
