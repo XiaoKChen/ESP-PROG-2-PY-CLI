@@ -1,7 +1,23 @@
 """Encode the DFU config block written to the RA4M1 data flash.
 
-FROZEN CONTRACT — these values are shared byte-for-byte with the bootloader that
-reads this block. Do not change any of them without changing the bootloader too.
+Builds the 80-byte v2 block (USB manufacturer/product names plus an optional per-device
+bootloader CAN ID pair) that the bootloader reads at boot, and validates its inputs at the
+boundary. flasher.py programs the result to CONFIG_ADDRESS; cli.py and app.py offer the names.
+
+Owns:        the block layout, CONFIG_ADDRESS, DEVICE_CAN_IDS (the single source of truth for
+             known devices and their fixed CAN ID pairs; DEVICE_NAMES derives from its keys),
+             and the provisioning defaults (DEFAULT_MANUFACTURER).
+Not here:    programming and read-back verification of the block (flasher.py); the bootloader's
+             own default CAN IDs (it owns 0x79E/0x79F — they are only mirrored here for help
+             text).
+Invariants:  FROZEN CONTRACT — the layout, magic, version, CRC, CONFIG_ADDRESS and field limits
+             are shared byte-for-byte with the bootloader that reads this block. Do not change
+             any of them without changing the bootloader too. The provisioning defaults and
+             DATA_FLASH_ENABLE_ADDR are not part of the contract.
+Errors:      raises DfuConfigError subclasses: InvalidNameError for a bad name,
+             InvalidCanIdError for an out-of-range or half-specified CAN ID pair.
+Depends on:  the standard library only.
+See also:    tests/test_dfu_config.py, flasher.py
 
 Block layout v2 (little-endian, 80 bytes, every unused/tail byte padded with 0xFF):
 

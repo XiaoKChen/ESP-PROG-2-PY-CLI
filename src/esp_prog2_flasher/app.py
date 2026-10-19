@@ -1,4 +1,18 @@
-"""Textual TUI: flash the RA4M1 target bootloader/application, or the ESP-Prog-2's own firmware."""
+"""Textual TUI: flash the RA4M1 bootloader/app, the PSoC 6 image, or the ESP-Prog-2 firmware.
+
+FlasherApp offers target (RA4M1 bootloader hex plus DFU config), application (.bin),
+PSoC 6 (IDU Radar hex) and ESP-Prog-2 firmware panels, plus a suffix-generalized file picker
+shared by all of them. It sits on top of flasher.py and is launched by cli.py when no flags
+are given.
+
+Owns:        the widget layout, key bindings and the UI-side parsing of the CAN ID inputs.
+Not here:    USB/serial/SWD access and all flashing logic (flasher.py), config-block encoding
+             and the device table (dfu_config.py); the TUI never touches hardware directly.
+Concurrency: flasher calls run in Textual thread workers (@work(thread=True)); results and
+             progress reach the UI only via call_from_thread.
+Depends on:  flasher.py, dfu_config.py, textual.
+See also:    cli.py
+"""
 
 from __future__ import annotations
 
