@@ -1,12 +1,27 @@
-"""Probe detection and bootloader flashing for the ESP-Prog-2 / RA4M1 target.
+"""UI-agnostic flashing engine: probe/target detection and every flash path of the tool.
 
-Wraps the pyOCD Python API. The proven, equivalent command-line path is:
+Wraps pyOCD to detect the ESP-Prog-2 CMSIS-DAP probe and to flash the RA4M1 (bootloader
+hex, application .bin, DFU config block) and the PSoC 6 (main-flash hex) over SWD, and wraps
+esptool to reflash the ESP-Prog-2's own ESP32-S3 firmware. It has no Textual dependency, so
+the same logic backs both the TUI and the headless CLI.
+
+Owns:        probe VID/PID and target-type names, APP_BASE_ADDRESS, the PSoC 6 flash and
+             metadata address ranges, bundled-asset lookup (hex/, packs/, firmware/), and
+             ESPTOOL_SHIM_FLAG (the frozen-build esptool re-exec flag dispatched by cli.py).
+Not here:    DFU config-block encoding and the device table (dfu_config.py), argument parsing
+             (cli.py), the TUI (app.py).
+Concurrency: calls block until hardware I/O finishes; progress and log callbacks fire on the
+             calling thread, so the TUI runs these functions in worker threads.
+Errors:      FlasherError hierarchy (ProbeNotFoundError, FlashFailedError); FileNotFoundError
+             for a missing image; InvalidNameError/InvalidCanIdError from dfu_config are
+             raised before any hardware is touched.
+Depends on:  dfu_config.py; pyocd, esptool, pyserial, intelhex and truststore, all imported
+             lazily so importing this module never blocks on USB.
+See also:    tests/test_psoc6.py, cli.py, app.py
+
+The proven, equivalent pyOCD command-line path for the RA4M1 is:
 
     pyocd flash -t r7fa4m1ab dfu_minima.hex
-
-This module reproduces that programmatically and adds ESP-Prog-2 auto-detection
-and target-presence detection. It deliberately has no Textual dependency so the
-same logic backs both the TUI and the headless ``--detect`` / ``--flash`` CLI.
 
 Note: the installed OpenOCD build lacks the ``renesas_ra`` flash driver, so
 flashing the RA4M1 must go through pyOCD, not OpenOCD.

@@ -1,4 +1,13 @@
-"""Tests for dfu_config — golden vectors, layout invariants, and validation."""
+"""Tests for dfu_config — golden vectors, layout invariants, and validation.
+
+Checks build_config_block against hand-computed golden vectors and an independent re-encoding,
+plus the name and CAN ID validation rules and the frozen device-to-CAN-ID table.
+
+Covers:       the 80-byte block layout and CRC, name and CAN ID validation errors, unset-ID
+              encoding, and the DEVICE_CAN_IDS / DEVICE_NAMES / boot_ids_for_device contract.
+Not covered:  programming the block to hardware and the data-flash read-back (flasher.py).
+See also:     src/esp_prog2_flasher/dfu_config.py
+"""
 
 from __future__ import annotations
 

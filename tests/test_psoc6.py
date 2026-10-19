@@ -1,4 +1,14 @@
-"""Tests for PSoC 6 hex segment filtering and default-hex resolution."""
+"""Tests for PSoC 6 hex segment filtering and default-hex resolution.
+
+Exercises psoc6_flash_segments on synthetic IntelHex images and on the bundled
+hex/psoc6_radar_full_image.hex, so out-of-range data is refused before any hardware is touched.
+
+Covers:       keeping main-flash segments, dropping Cypress metadata sections, rejecting data
+              outside main flash or straddling its end, rejecting metadata-only images, and
+              resolving the bundled default image.
+Not covered:  flash_psoc6 itself and anything needing a probe or target.
+See also:     src/esp_prog2_flasher/flasher.py
+"""
 
 from __future__ import annotations
 

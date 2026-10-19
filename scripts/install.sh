@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
 # Install the released esp-prog2-flasher binary to ~/.local/bin (macOS/Linux).
+#
+# Downloads the platform asset from the GitHub release (via gh, else curl), marks it
+# executable, and tells the user how to put ~/.local/bin on PATH. It prompts before replacing
+# an existing install found on PATH.
+#
+# Not here:    building the binary (scripts/build.sh) or publishing the release
+#              (.github/workflows/build.yml).
+# Errors:      exits 1 on an unsupported OS, a missing gh/curl, or a failed download; exits 0
+#              when the user declines to replace an existing install or the shell is
+#              non-interactive.
+# Depends on:  gh (preferred; the repo is private) or curl.
+# See also:    scripts/install.ps1
+#
 # Usage: install.sh [vX.Y.Z]   (defaults to the latest release)
 set -euo pipefail
 

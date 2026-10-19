@@ -1,4 +1,20 @@
-"""Command-line entry point. No args launches the Textual TUI."""
+"""Command-line entry point: headless flash/detect flags, or the Textual TUI when run bare.
+
+Parses arguments with argparse and drives flasher.py for the RA4M1 bootloader, application
+and DFU config block, the PSoC 6 image, and the ESP-Prog-2's own firmware. With no flags it
+launches the TUI in app.py.
+
+Owns:        the flag set and the interactive/headless DFU-config resolution (names plus boot
+             CAN ID pair); the hidden ESPTOOL_SHIM_FLAG dispatch that lets a frozen build
+             re-exec itself as esptool.
+Not here:    the flashing engine (flasher.py), the TUI (app.py), config-block encoding and the
+             device/CAN-ID table (dfu_config.py).
+Errors:      invalid or conflicting arguments exit with code 2; a failed flash or download
+             logs the exception, prints to stderr and exits with code 1; --detect exits 2 only
+             when no probe is found, otherwise 0.
+Depends on:  flasher.py, dfu_config.py, and app.py (imported lazily, only for the TUI).
+See also:    __main__.py, tests/test_dfu_config.py
+"""
 
 from __future__ import annotations
 
