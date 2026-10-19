@@ -515,10 +515,10 @@ def _config_block_or_none(
     """Build the DFU config block, or ``None`` when no names are given.
 
     Raises:
-        ValueError: (as ``InvalidNameError``/``InvalidCanIdError``) if only one
-            name is supplied, a name violates the frozen contract, or the boot
-            CAN ID pair is half-specified or out of range — surfaced at the entry
-            point, not mid-flash.
+        InvalidNameError: if only one name is supplied or a name violates the
+            frozen contract.
+        InvalidCanIdError: if the boot CAN ID pair is half-specified or out of
+            range. Both are surfaced at the entry point, not mid-flash.
     """
     from .dfu_config import InvalidNameError, build_config_block
 
@@ -572,7 +572,7 @@ def write_dfu_config(
 ) -> None:
     """Write only the DFU name config block to the RA4M1 data flash (standalone).
 
-    Opens its own session, reset-and-halts, programs the 76-byte block through
+    Opens its own session, reset-and-halts, programs the 80-byte block through
     the flash algorithm, and read-back-verifies. Raises on failure.
     """
     from .dfu_config import build_config_block

@@ -163,10 +163,10 @@ class FilePickerScreen(ModalScreen[Path | None]):
 
 
 class FlasherApp(App):
-    """Detect the ESP-Prog-2 + RA4M1, flash the target bootloader, or reflash the probe."""
+    """Detect the ESP-Prog-2; flash the RA4M1 (bootloader/config, app), PSoC 6, or the probe."""
 
     TITLE = "ESP-Prog-2 Flasher"
-    SUB_TITLE = f"RA4M1 target  +  ESP-Prog-2 firmware  ·  v{__version__}"
+    SUB_TITLE = f"RA4M1  ·  PSoC 6  ·  ESP-Prog-2  ·  v{__version__}"
 
     CSS = """
     Screen { background: $surface; }
