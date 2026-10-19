@@ -1,4 +1,16 @@
 # Install the released esp-prog2-flasher binary and add it to the user PATH (Windows).
+#
+# Downloads the Windows asset from the GitHub release (via gh, else Invoke-WebRequest) into
+# %LOCALAPPDATA%\Programs\esp-prog2-flasher and appends that directory to the user PATH. It
+# prompts before replacing an existing install found on PATH.
+#
+# Not here:    building the binary (scripts/build.ps1) or publishing the release
+#              (.github/workflows/build.yml).
+# Errors:      throws on a failed gh or web download; exits 0 when the user declines to
+#              replace an existing install or the session is non-interactive.
+# Depends on:  gh (preferred; the repo is private) or Invoke-WebRequest.
+# See also:    scripts/install.sh
+#
 # Usage: install.ps1 [-Version vX.Y.Z]   (defaults to the latest release)
 param(
     [string]$Version = "latest"

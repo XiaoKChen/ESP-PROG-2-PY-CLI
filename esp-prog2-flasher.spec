@@ -1,9 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller build spec for the esp-prog2-flasher one-file executable.
 
-Bundles the hex/ and firmware/ data files plus the plugin data/entry-points that
-pyocd, esptool, and textual need (target packs, stub-flasher JSONs, CSS/tree-sitter
-data, and pyocd's ``pyocd.probe`` / ``pyocd.rtos`` entry-point plugins).
+Freezes src/esp_prog2_flasher/__main__.py into a single console executable. Bundles the hex/,
+firmware/ and packs/ data files plus the plugin data/entry-points that pyocd, esptool, and
+textual need (target packs, stub-flasher JSONs, CSS/tree-sitter data, and pyocd's
+``pyocd.probe`` / ``pyocd.rtos`` entry-point plugins).
+
+Owns:        the list of bundled data files and the per-package collect_all hooks.
+Not here:    invoking the build (scripts/build.sh, scripts/build.ps1) and release packaging
+             (.github/workflows/build.yml).
+Invariants:  bundled paths must match the names flasher.py resolves from _MEIPASS.
+See also:    scripts/build.sh, scripts/build.ps1, src/esp_prog2_flasher/flasher.py
 """
 
 from PyInstaller.utils.hooks import collect_all, collect_entry_point

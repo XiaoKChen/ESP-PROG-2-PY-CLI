@@ -1,13 +1,23 @@
 #!/usr/bin/env bash
 # Run esp-prog2-flasher from source on Termux (Android).
 #
+# Installs the runtime dependencies (read from pyproject.toml) into Termux's system pip on
+# first run, then launches the package with src/ on PYTHONPATH, passing all arguments through.
+#
+# Owns:        the Termux-specific bootstrap: dependency install and the PYTHONPATH launch.
+# Not here:    packaged binaries (scripts/build.*, scripts/install.*); everywhere other than
+#              Termux, use the packaged binary or `uv run esp-prog2-flasher`.
+# Errors:      exits 1 when pip is missing or no dependencies could be parsed from
+#              pyproject.toml.
+# Depends on:  Termux python (pip) and libusb; USB access additionally needs Termux:API.
+# See also:    pyproject.toml
+#
 # WHY NOT A FROZEN BINARY: PyInstaller does not support Android — its bootloader
 # has no Bionic/Android target — and a Termux-built binary would only run inside
 # Termux anyway, so freezing buys nothing here. We run straight from source
 # instead. uv is also unusable on Termux (it rejects Android's OS tag, and the
 # project's uv_build backend can't compile there), so runtime deps go into
-# Termux's own system pip. Everywhere else, use the packaged binary or
-# `uv run esp-prog2-flasher`.
+# Termux's own system pip.
 #
 # Prerequisites (one-time, inside Termux):
 #   pkg install python libusb
