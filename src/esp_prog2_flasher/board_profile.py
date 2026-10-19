@@ -174,6 +174,8 @@ def _rule_violation(
         return f"twai_tx_gpio and twai_rx_gpio must differ, both are GPIO{twai_tx_gpio}"
     if bitrate_code not in tuple(Bitrate):
         return f"bitrate code must be 0..{max(Bitrate)}, got {bitrate_code}"
+    if not 0 <= mask < (1 << (MAX_GPIO + 1)):
+        return f"hold_low_mask 0x{mask:X} names a GPIO above {MAX_GPIO}"
     if mask & _REFUSED_MASK:
         return f"hold_low_mask 0x{mask:X} holds a refused GPIO"
     if mask & ((1 << twai_tx_gpio) | (1 << twai_rx_gpio)):
@@ -185,16 +187,12 @@ def encode_profile_record(record: ProfileRecord) -> bytes:
     """Encode the 24-byte board-profile record.
 
     Raises:
-        InvalidProfileError: if a field breaks the record's rules, or (stricter than
-            the reader) the hold mask names a GPIO above 48, so the tool never writes
-            a hold the chip cannot carry out.
+        InvalidProfileError: if a field breaks the record's rules.
     """
     fields = (record.twai_tx_gpio, record.twai_rx_gpio, record.hold_low_mask)
     if any(isinstance(value, bool) or not isinstance(value, int) for value in fields):
         raise InvalidProfileError(f"record fields must be integers, got {record!r}")
     mask = record.hold_low_mask
-    if not 0 <= mask < (1 << (MAX_GPIO + 1)):
-        raise InvalidProfileError(f"hold_low_mask 0x{mask:X} names a GPIO above {MAX_GPIO}")
     violation = _rule_violation(record.twai_tx_gpio, record.twai_rx_gpio, record.bitrate, mask)
     if violation is not None:
         raise InvalidProfileError(violation)

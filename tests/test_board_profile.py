@@ -197,6 +197,7 @@ def _bad_crc() -> bytes:
         pytest.param(_raw_record(mask=1 << 0), id="hold-refused"),
         pytest.param(_raw_record(mask=1 << 6), id="hold-tx"),
         pytest.param(_raw_record(mask=1 << 7), id="hold-rx"),
+        pytest.param(_raw_record(mask=1 << 49), id="hold-above-48"),
     ],
 )
 def test_invalid_record_decodes_to_none(data: bytes) -> None:
