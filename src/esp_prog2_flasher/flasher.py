@@ -307,6 +307,7 @@ def _detect_target(
                 TargetState.CONNECTED, f"{label} connected via {info.unique_id}.", info
             )
     except Exception as exc:  # noqa: BLE001 — surface any link/examine failure as "no target"
+        logger.debug("session open failed for %s", info.unique_id, exc_info=True)
         return DetectResult(
             TargetState.NO_TARGET,
             f"Probe {info.unique_id} found, but no {label} target responded over SWD "
