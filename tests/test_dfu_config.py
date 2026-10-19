@@ -1,15 +1,18 @@
 """Tests for dfu_config — golden vectors, layout invariants, validation, and decoding.
 
 Checks build_config_block against hand-computed golden vectors and an independent re-encoding,
-plus the name and CAN ID validation rules and the frozen device-to-CAN-ID table, and
-round-trips blocks through parse_config_block.
+plus the name and CAN ID validation rules and the frozen device-to-CAN-ID table; round-trips
+blocks through parse_config_block; and checks how flasher.py finds a node's cancfg partition
+in a synthetic ESP-IDF partition table.
 
 Covers:       the 80-byte block layout and CRC, name and CAN ID validation errors, unset-ID
               encoding, the DEVICE_CAN_IDS / DEVICE_NAMES / boot_ids_for_device contract,
               parse_config_block (round-trips, v1 acceptance, bad magic/version/length/CRC,
-              erased flash, per-ID fallback for out-of-range IDs).
-Not covered:  programming the block to hardware and the data-flash read-back (flasher.py).
-See also:     src/esp_prog2_flasher/dfu_config.py
+              erased flash, per-ID fallback for out-of-range IDs), and
+              flasher.parse_partition_table / cancfg_offset_from_table.
+Not covered:  programming the block to hardware, the RA4M1 data-flash read-back, and the
+              esptool reads/writes of a node's flash (flasher.py).
+See also:     src/esp_prog2_flasher/dfu_config.py, src/esp_prog2_flasher/flasher.py
 """
 
 from __future__ import annotations
@@ -37,6 +40,14 @@ from esp_prog2_flasher.dfu_config import (
     boot_ids_for_device,
     build_config_block,
     parse_config_block,
+)
+from esp_prog2_flasher.flasher import (
+    DEFAULT_CANCFG_OFFSET,
+    PARTITION_TABLE_SIZE,
+    FlasherError,
+    PartitionEntry,
+    cancfg_offset_from_table,
+    parse_partition_table,
 )
 
 
@@ -331,3 +342,81 @@ def test_v1_block_keeps_names_and_uses_default_ids() -> None:
     assert parse_config_block(v1) == DfuConfig(
         "Acme", "Widget-1", DEFAULT_BOOT_CMD_ID, DEFAULT_BOOT_REPLY_ID
     )
+
+
+# --- flasher partition-table parsing (node cancfg lookup) ---------------------
+
+PartitionRow = tuple[str, int, int, int, int]  # name, type, subtype, offset, size
+
+
+def _entry(name: str, ptype: int, subtype: int, offset: int, size: int) -> bytes:
+    raw_name = name.encode().ljust(16, b"\x00")
+    return struct.pack("<2sBBII16sI", b"\xaa\x50", ptype, subtype, offset, size, raw_name, 0)
+
+
+_MD5_ENTRY = b"\xeb\xeb" + b"\xff" * 14 + bytes(range(16))
+
+# Mirrors node_updater/partitions.csv.
+_NODE_ROWS: list[PartitionRow] = [
+    ("nvs", 0x01, 0x02, 0x9000, 0x5000),
+    ("otadata", 0x01, 0x00, 0xE000, 0x2000),
+    ("phy_init", 0x01, 0x01, 0x10000, 0x1000),
+    ("cancfg", 0x01, 0x40, 0x11000, 0x1000),
+    ("bootcnt", 0x01, 0x42, 0x12000, 0x1000),
+    ("factory", 0x00, 0x00, 0x20000, 0x60000),
+    ("ota_0", 0x00, 0x10, 0x80000, 0x1C0000),
+    ("ota_1", 0x00, 0x11, 0x240000, 0x1C0000),
+]
+_NVS_ROW: PartitionRow = ("nvs", 0x01, 0x02, 0x9000, 0x5000)
+
+
+def _table(rows: list[PartitionRow], md5: bool = True) -> bytes:
+    raw = b"".join(_entry(*row) for row in rows) + (_MD5_ENTRY if md5 else b"")
+    return raw.ljust(PARTITION_TABLE_SIZE, b"\xff")
+
+
+@pytest.mark.parametrize("md5", [True, False])
+def test_parses_node_partition_table(md5: bool) -> None:
+    entries = parse_partition_table(_table(_NODE_ROWS, md5=md5))
+    assert entries == [PartitionEntry(*row) for row in _NODE_ROWS]
+
+
+def test_parses_sixteen_char_name_without_terminator() -> None:
+    entries = parse_partition_table(_table([("abcdefghijklmnop", 0x01, 0x40, 0x11000, 0x1000)]))
+    assert entries[0].name == "abcdefghijklmnop"
+
+
+def test_finds_cancfg_offset_in_node_table() -> None:
+    assert cancfg_offset_from_table(_table(_NODE_ROWS)) == DEFAULT_CANCFG_OFFSET == 0x11000
+
+
+def test_finds_relocated_cancfg_partition() -> None:
+    rows = [_NVS_ROW, ("cancfg", 0x01, 0x40, 0x15000, 0x1000)]
+    assert cancfg_offset_from_table(_table(rows)) == 0x15000
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        pytest.param(b"\xff" * PARTITION_TABLE_SIZE, id="erased"),
+        pytest.param(b"\x00" * PARTITION_TABLE_SIZE, id="garbage"),
+        pytest.param(_entry(*_NVS_ROW) + b"\x12\x34" + b"\x00" * 30, id="garbage-after-entry"),
+        pytest.param(b"", id="empty"),
+    ],
+)
+def test_no_partition_table_means_fallback(table: bytes) -> None:
+    assert parse_partition_table(table) == []
+    assert cancfg_offset_from_table(table) is None
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param(("cancfg", 0x01, 0x41, 0x11000, 0x1000), id="wrong-subtype"),
+        pytest.param(("cancfg", 0x00, 0x40, 0x11000, 0x1000), id="app-type"),
+        pytest.param(("cancfg2", 0x01, 0x40, 0x11000, 0x1000), id="wrong-name"),
+    ],
+)
+def test_valid_table_without_cancfg_raises(row: PartitionRow) -> None:
+    with pytest.raises(FlasherError, match="cancfg"):
+        cancfg_offset_from_table(_table([_NVS_ROW, row]))

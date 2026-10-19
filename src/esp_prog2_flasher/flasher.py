@@ -2,14 +2,20 @@
 
 Wraps pyOCD to detect the ESP-Prog-2 CMSIS-DAP probe and to flash the RA4M1 (bootloader
 hex, application .bin, DFU config block) and the PSoC 6 (main-flash hex) over SWD, and wraps
-esptool to reflash the ESP-Prog-2's own ESP32-S3 firmware. It has no Textual dependency, so
-the same logic backs both the TUI and the headless CLI.
+esptool to reflash the ESP-Prog-2's own ESP32-S3 firmware and to provision (write, verify,
+read back) the DFU config block in an ESP32-S3 CAN node's ``cancfg`` partition over the
+node's own serial/USB download port. It has no Textual dependency, so the same logic backs
+both the TUI and the headless CLI.
 
 Owns:        probe VID/PID and target-type names, APP_BASE_ADDRESS, the PSoC 6 flash and
-             metadata address ranges, bundled-asset lookup (hex/, packs/, firmware/), and
-             ESPTOOL_SHIM_FLAG (the frozen-build esptool re-exec flag dispatched by cli.py).
-Not here:    DFU config-block encoding and the device table (dfu_config.py), argument parsing
-             (cli.py), the TUI (app.py).
+             metadata address ranges, bundled-asset lookup (hex/, packs/, firmware/),
+             ESPTOOL_SHIM_FLAG (the frozen-build esptool re-exec flag dispatched by cli.py),
+             and the node's partition-table offset/entry format, the cancfg partition identity
+             and its fallback offset.
+Not here:    DFU config-block encoding/decoding and the device table (dfu_config.py), argument
+             parsing (cli.py), the TUI (app.py).
+Invariants:  a node's config block is only written to the cancfg partition its partition table
+             names; the fixed DEFAULT_CANCFG_OFFSET is used only when no valid table is found.
 Concurrency: calls block until hardware I/O finishes; progress and log callbacks fire on the
              calling thread, so the TUI runs these functions in worker threads.
 Errors:      FlasherError hierarchy (ProbeNotFoundError, FlashFailedError); FileNotFoundError
@@ -17,7 +23,7 @@ Errors:      FlasherError hierarchy (ProbeNotFoundError, FlashFailedError); File
              raised before any hardware is touched.
 Depends on:  dfu_config.py; pyocd, esptool, pyserial, intelhex and truststore, all imported
              lazily so importing this module never blocks on USB.
-See also:    tests/test_psoc6.py, cli.py, app.py
+See also:    tests/test_psoc6.py, tests/test_dfu_config.py, cli.py, app.py
 
 The proven, equivalent pyOCD command-line path for the RA4M1 is:
 
@@ -32,8 +38,10 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+import struct
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from collections.abc import Callable
@@ -46,6 +54,8 @@ if TYPE_CHECKING:
     from intelhex import IntelHex
     from pyocd.core.session import Session
     from pyocd.probe.debug_probe import DebugProbe
+
+    from .dfu_config import DfuConfig
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +104,23 @@ PSOC6_FLASH_END: Final[int] = 0x10080000
 # protection) as pseudo-sections up here; they are not target memory.
 PSOC6_METADATA_START: Final[int] = 0x90000000
 PSOC6_METADATA_END: Final[int] = 0xA0000000
+
+# ESP32-S3 CAN node (node_updater): the DFU config block lives in a raw data
+# partition named "cancfg" with custom subtype 0x40 (node_updater/partitions.csv).
+NODE_CHIP: Final[str] = "esp32s3"
+PARTITION_TABLE_OFFSET: Final[int] = 0x8000  # CONFIG_PARTITION_TABLE_OFFSET
+PARTITION_TABLE_SIZE: Final[int] = 0xC00  # ESP-IDF maximum table length
+# Used only when the node has no valid partition table (e.g. blank flash).
+DEFAULT_CANCFG_OFFSET: Final[int] = 0x11000
+CANCFG_PARTITION_NAME: Final[str] = "cancfg"
+CANCFG_PARTITION_SUBTYPE: Final[int] = 0x40
+PARTITION_TYPE_DATA: Final[int] = 0x01
+# ESP-IDF partition entry: magic, type, subtype, offset, size, name[16], flags.
+_PARTITION_ENTRY_FORMAT: Final[str] = "<2sBBII16sI"
+_PARTITION_ENTRY_SIZE: Final[int] = struct.calcsize(_PARTITION_ENTRY_FORMAT)  # 32
+_PARTITION_ENTRY_MAGIC: Final[bytes] = b"\xaa\x50"  # u16 0x50AA little-endian
+_PARTITION_MD5_MAGIC: Final[bytes] = b"\xeb\xeb"  # optional MD5 entry ends the table
+_PARTITION_END_MAGIC: Final[bytes] = b"\xff\xff"  # erased flash ends the table
 
 ProgressCallback = Callable[[float], None]
 LogCallback = Callable[[str], None]
@@ -704,18 +731,37 @@ def flash_probe(
     if not bin_path.is_file():
         raise FileNotFoundError(f"Firmware file not found: {bin_path}")
 
-    if getattr(sys, "frozen", False):
-        # No "esptool" script on PATH and sys.executable is this bundle itself —
-        # re-exec it with a hidden flag that cli.py dispatches to esptool.main().
-        args = [sys.executable, ESPTOOL_SHIM_FLAG, "--chip", PROBE_CHIP]
-    else:
-        args = [sys.executable, "-m", "esptool", "--chip", PROBE_CHIP]
+    args = _esptool_command(PROBE_CHIP)
     if port:
         args += ["--port", port]
     args += ["--baud", str(baud), "write-flash", PROBE_FLASH_OFFSET, str(bin_path)]
 
     if log:
         log("esptool " + " ".join(args[3:]))
+    returncode = _run_esptool(args, progress, log)
+    if returncode != 0:
+        raise FlashFailedError(
+            f"esptool exited with code {returncode}. "
+            "Is the ESP-Prog-2 in download mode (hold BOOT, tap RESET)?"
+        )
+
+
+def _esptool_command(chip: str) -> list[str]:
+    """Return the argv prefix that runs esptool for ``chip``, from source or a frozen build."""
+    if getattr(sys, "frozen", False):
+        # No "esptool" script on PATH and sys.executable is this bundle itself —
+        # re-exec it with a hidden flag that cli.py dispatches to esptool.main().
+        return [sys.executable, ESPTOOL_SHIM_FLAG, "--chip", chip]
+    return [sys.executable, "-m", "esptool", "--chip", chip]
+
+
+def _run_esptool(
+    args: list[str], progress: ProgressCallback | None, log: LogCallback | None
+) -> int:
+    """Run esptool, streaming its output to ``log`` and its percentages to ``progress``.
+
+    Returns esptool's exit code; callers turn a non-zero code into their own error.
+    """
     percent = re.compile(r"\((\d+)\s*%\)")
     proc = subprocess.Popen(
         args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
@@ -729,8 +775,176 @@ def flash_probe(
         if match and progress:
             with contextlib.suppress(ValueError):
                 progress(float(match.group(1)))
-    if proc.wait() != 0:
-        raise FlashFailedError(
-            f"esptool exited with code {proc.returncode}. "
-            "Is the ESP-Prog-2 in download mode (hold BOOT, tap RESET)?"
+    return proc.wait()
+
+
+# ---------------------------------------------------------------------------
+# ESP32-S3 CAN node — DFU config block in the node's `cancfg` data partition,
+# written over the NODE's own serial/USB download port (not the ESP-Prog-2's).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class PartitionEntry:
+    """One entry of an ESP-IDF partition table."""
+
+    name: str
+    partition_type: int
+    subtype: int
+    offset: int
+    size: int
+
+
+def parse_partition_table(table: bytes) -> list[PartitionEntry]:
+    """Decode a raw ESP-IDF partition table, or return ``[]`` if ``table`` holds none.
+
+    Entries are read until the erased-flash (0xFFFF) or MD5 (0xEBEB) marker. An
+    entry with any other unknown magic means this is not a partition table (blank
+    or foreign flash), so nothing is returned rather than an untrustworthy prefix.
+    """
+    entries: list[PartitionEntry] = []
+    for start in range(0, len(table) - _PARTITION_ENTRY_SIZE + 1, _PARTITION_ENTRY_SIZE):
+        magic, partition_type, subtype, offset, size, raw_name, _flags = struct.unpack_from(
+            _PARTITION_ENTRY_FORMAT, table, start
         )
+        if magic in (_PARTITION_END_MAGIC, _PARTITION_MD5_MAGIC):
+            break
+        if magic != _PARTITION_ENTRY_MAGIC:
+            return []
+        name = raw_name.split(b"\x00", 1)[0].decode("ascii", "replace")
+        entries.append(PartitionEntry(name, partition_type, subtype, offset, size))
+    return entries
+
+
+def cancfg_offset_from_table(table: bytes) -> int | None:
+    """Return the ``cancfg`` partition offset named by a raw partition table.
+
+    Returns ``None`` when ``table`` holds no valid partition table (e.g. blank
+    flash) so the caller can fall back to ``DEFAULT_CANCFG_OFFSET``.
+
+    Raises:
+        FlasherError: if the table is valid but has no cancfg data partition —
+            the node firmware would never read a block written anywhere else.
+    """
+    entries = parse_partition_table(table)
+    if not entries:
+        return None
+    for entry in entries:
+        if (
+            entry.partition_type == PARTITION_TYPE_DATA
+            and entry.subtype == CANCFG_PARTITION_SUBTYPE
+            and entry.name == CANCFG_PARTITION_NAME
+        ):
+            return entry.offset
+    raise FlasherError(
+        f"The node's partition table has no {CANCFG_PARTITION_NAME!r} data partition "
+        f"(subtype 0x{CANCFG_PARTITION_SUBTYPE:02X}); is this a CAN node running node_updater?"
+    )
+
+
+def _run_node_esptool(
+    port: str,
+    baud: int,
+    command: list[str],
+    log: LogCallback | None,
+    progress: ProgressCallback | None = None,
+) -> None:
+    esptool_args = ["--port", port, "--baud", str(baud), *command]
+    if log:
+        log(f"esptool --chip {NODE_CHIP} " + " ".join(esptool_args))
+    returncode = _run_esptool(_esptool_command(NODE_CHIP) + esptool_args, progress, log)
+    if returncode != 0:
+        raise FlashFailedError(
+            f"esptool exited with code {returncode}. Is the node's ESP32-S3 connected on "
+            f"{port} and able to enter download mode?"
+        )
+
+
+def _read_node_flash(
+    port: str, baud: int, offset: int, size: int, log: LogCallback | None
+) -> bytes:
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = Path(tmp) / "read.bin"
+        _run_node_esptool(
+            port, baud, ["read-flash", f"0x{offset:X}", str(size), str(out_path)], log
+        )
+        return out_path.read_bytes()
+
+
+def _node_cancfg_offset(port: str, baud: int, log: LogCallback | None) -> int:
+    table = _read_node_flash(port, baud, PARTITION_TABLE_OFFSET, PARTITION_TABLE_SIZE, log)
+    offset = cancfg_offset_from_table(table)
+    if offset is None:
+        offset = DEFAULT_CANCFG_OFFSET
+        logger.info("No partition table at 0x%X; using 0x%X", PARTITION_TABLE_OFFSET, offset)
+        if log:
+            log(
+                f"No valid partition table at 0x{PARTITION_TABLE_OFFSET:X}; "
+                f"using the default cancfg offset 0x{offset:X}"
+            )
+    elif log:
+        log(f"Found {CANCFG_PARTITION_NAME} partition @ 0x{offset:X}")
+    return offset
+
+
+def provision_node(
+    port: str,
+    manufacturer: str,
+    product: str,
+    boot_cmd_id: int | None = None,
+    boot_reply_id: int | None = None,
+    baud: int = DEFAULT_BAUD_RATE,
+    progress: ProgressCallback | None = None,
+    log: LogCallback | None = None,
+) -> None:
+    """Write the DFU config block to an ESP32-S3 CAN node's cancfg partition and verify it.
+
+    The offset comes from the node's partition table (``DEFAULT_CANCFG_OFFSET`` if
+    it has none). After writing, the block is read back and compared byte-for-byte.
+
+    Raises:
+        InvalidNameError, InvalidCanIdError: bad names/IDs, before any hardware I/O.
+        FlasherError: a valid partition table without a cancfg partition.
+        FlashFailedError: esptool failed, or the read-back differs from the block.
+    """
+    from .dfu_config import build_config_block
+
+    # Fail fast on bad names/IDs before touching hardware.
+    block = build_config_block(manufacturer, product, boot_cmd_id, boot_reply_id)
+    offset = _node_cancfg_offset(port, baud, log)
+
+    if log:
+        log(f"Writing DFU config block ({len(block)} bytes) @ 0x{offset:X}")
+    with tempfile.TemporaryDirectory() as tmp:
+        block_path = Path(tmp) / "cancfg.bin"
+        block_path.write_bytes(block)
+        _run_node_esptool(
+            port, baud, ["write-flash", f"0x{offset:X}", str(block_path)], log, progress
+        )
+
+    readback = _read_node_flash(port, baud, offset, len(block), log)
+    if readback != block:
+        raise FlashFailedError(
+            f"Node config read-back mismatch at 0x{offset:X}: "
+            f"wrote {block.hex()}, read {readback.hex()}"
+        )
+    if log:
+        log("Node config verified.")
+
+
+def read_node_config(
+    port: str, baud: int = DEFAULT_BAUD_RATE, log: LogCallback | None = None
+) -> DfuConfig | None:
+    """Read and decode the DFU config block from an ESP32-S3 CAN node's cancfg partition.
+
+    Returns ``None`` when the block is unprovisioned or invalid — the node then
+    uses its defaults (0x79E/0x79F, empty name).
+
+    Raises:
+        FlasherError: a valid partition table without a cancfg partition.
+        FlashFailedError: esptool failed.
+    """
+    from .dfu_config import BLOCK_SIZE, parse_config_block
+
+    offset = _node_cancfg_offset(port, baud, log)
+    return parse_config_block(_read_node_flash(port, baud, offset, BLOCK_SIZE, log))
