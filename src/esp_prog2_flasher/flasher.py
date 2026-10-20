@@ -23,8 +23,10 @@ Invariants:  a node's config block is only written to the cancfg partition its p
              names; the fixed DEFAULT_CANCFG_OFFSET is used only when no valid table is found.
              A SOLO flash validates the manifest, the app image and the cancfg image before its
              first esptool call; every esptool step but the last keeps the chip in download mode
-             (--after no-reset) and the last one ends with --after watchdog-reset, because the
-             RTS hard reset does not reboot an ESP32-S3 over USB-Serial-JTAG.
+             (--after no-reset); a separate final chip-id call reboots the board with
+             --after watchdog-reset, because the RTS hard reset does not reboot an ESP32-S3
+             over USB-Serial-JTAG. That call's exit code is ignored: the port re-enumerates
+             as the chip reboots, which esptool reports as a serial error.
 Concurrency: calls block until hardware I/O finishes; progress and log callbacks fire on the
              calling thread, so the TUI runs these functions in worker threads.
 Errors:      FlasherError hierarchy (ProbeNotFoundError, FlashFailedError, BundleError for a
@@ -145,7 +147,8 @@ LogCallback = Callable[[str], None]
 # Runs one esptool argv and returns its exit code. Injected so tests can capture the
 # exact command plan without hardware; _run_esptool is the real one.
 EsptoolRunner = Callable[[list[str], ProgressCallback | None, LogCallback | None], int]
-# esptool --after modes: no-reset between steps, watchdog-reset after the last one.
+# esptool --after modes: no-reset for every write/verify step; the board is rebooted by a
+# separate final call (_reboot_node_board).
 ResetMode = Literal["no-reset", "watchdog-reset"]
 
 
@@ -890,6 +893,20 @@ def _run_node_esptool(
         )
 
 
+def _reboot_node_board(port: str, log: LogCallback | None, runner: EsptoolRunner) -> None:
+    """Reboot the board with a watchdog reset, tolerating the port vanishing mid-call.
+
+    Over USB-Serial-JTAG the chip resets and the port disappears while esptool still
+    holds it, so esptool exits non-zero after a successful reset; that is not a failure.
+    """
+    esptool_args = ["--port", port, "--before", "no-reset", "--after", "watchdog-reset", "chip-id"]
+    if log:
+        log(f"esptool --chip {NODE_CHIP} " + " ".join(esptool_args))
+    returncode = runner(_esptool_command(NODE_CHIP) + esptool_args, None, log)
+    if returncode != 0 and log:
+        log("board rebooted (the USB port re-enumerates)")
+
+
 def _read_node_flash(
     port: str,
     baud: int,
@@ -1013,7 +1030,7 @@ def read_node_config(
 # ---------------------------------------------------------------------------
 
 SOLO_BUNDLE_REPO: Final[str] = "XiaoKChen/Embedded-CAN-Bootloaders"
-DEFAULT_SOLO_BUNDLE_TAG: Final[str] = "c-cpp-esp32-v1.2.0"
+DEFAULT_SOLO_BUNDLE_TAG: Final[str] = "c-cpp-esp32-v1.2.1"
 SOLO_BUNDLE_ASSET_PATTERN: Final[str] = "esp32s3-can-updater-*.zip"
 SOLO_MANIFEST_NAME: Final[str] = "manifest.json"
 SOLO_MANIFEST_FORMAT: Final[int] = 1
@@ -1246,8 +1263,9 @@ def flash_solo(
     4. With ``app``, write it at ``ota_0`` plus an otadata image selecting ota_0;
        without it the board boots the CAN updater.
 
-    The last step ends with ``--after watchdog-reset``. Everything is validated before
-    the first esptool call.
+    Every step runs with ``--after no-reset``; a final ``chip-id`` call then reboots the
+    board with ``--after watchdog-reset`` and its exit code is ignored. Everything is
+    validated before the first esptool call.
 
     Raises:
         BundleError: the bundle is invalid or lacks the profile's layout.
@@ -1329,7 +1347,7 @@ def flash_solo(
             len(cancfg),
             log,
             runner,
-            after="no-reset" if app_path is not None else "watchdog-reset",
+            after="no-reset",
         )
         if readback != cancfg:
             raise FlashFailedError(
@@ -1354,8 +1372,9 @@ def flash_solo(
                 log,
                 progress,
                 runner,
-                after="watchdog-reset",
+                after="no-reset",
             )
+        _reboot_node_board(port, log, runner)
     _log("Done.")
 
 

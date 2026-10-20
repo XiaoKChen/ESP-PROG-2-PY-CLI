@@ -160,7 +160,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Flash a SOLO board (ESP32-S3) over its own USB port: the Embedded-CAN-Bootloaders "
         "bundle (bootloader, partition table, otadata, CAN updater) plus the board's cancfg "
-        "(DFU config + board profile), verified by read-back, then a watchdog reset. odu = "
+        "(DFU config + board profile), verified by read-back, then a separate watchdog-reset "
+        "call. odu = "
         f"{SOLO_BOARDS['odu']!r}, idu = {SOLO_BOARDS['idu']!r}; omit the board to pick it "
         "interactively. Requires --port.",
     )

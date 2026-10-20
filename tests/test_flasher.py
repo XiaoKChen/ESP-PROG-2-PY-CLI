@@ -115,11 +115,14 @@ class FakeEsptool:
     every absolute path as its bare file name, so plans compare as plain lists.
     """
 
-    def __init__(self, returncode: int = 0, corrupt_reads: bool = False) -> None:
+    def __init__(
+        self, returncode: int = 0, corrupt_reads: bool = False, reset_returncode: int = 0
+    ) -> None:
         self.calls: list[list[str]] = []
         self.flash: dict[int, bytes] = {}
         self._returncode = returncode
         self._corrupt_reads = corrupt_reads
+        self._reset_returncode = reset_returncode
 
     def __call__(
         self, args: list[str], progress: ProgressCallback | None, log: LogCallback | None
@@ -128,6 +131,8 @@ class FakeEsptool:
         assert args[: len(prefix)] == prefix
         command = args[len(prefix) :]
         self.calls.append([Path(a).name if Path(a).is_absolute() else a for a in command])
+        if command == _RESET_COMMAND:
+            return self._reset_returncode
         if self._returncode != 0:
             return self._returncode
         if "write-flash" in command:
@@ -150,6 +155,17 @@ class FakeEsptool:
 
 def _conn(after: str) -> list[str]:
     return ["--port", _PORT, "--baud", str(DEFAULT_BAUD_RATE), "--after", after]
+
+
+_RESET_COMMAND = [
+    "--port",
+    _PORT,
+    "--before",
+    "no-reset",
+    "--after",
+    "watchdog-reset",
+    "chip-id",
+]
 
 
 def _write_bundle(flash_size: str, table: str, factory: str) -> list[str]:
@@ -185,7 +201,8 @@ def test_odu_plan_without_app(tmp_path: Path) -> None:
     flash_solo(_ODU, _PORT, _make_bundle(tmp_path / "bundle"), runner=fake)
     assert fake.calls == [
         _write_bundle("4MB", "partition-table-node-4MB.bin", "0x20000"),
-        [*_conn("watchdog-reset"), "read-flash", "0x11000", "4096", "read.bin"],
+        [*_conn("no-reset"), "read-flash", "0x11000", "4096", "read.bin"],
+        _RESET_COMMAND,
     ]
     assert fake.flash[0x11000] == _golden_cancfg("SOLO ODU Controller")
     assert fake.flash[0xE000] == _BUNDLE_FILES["ota_data_initial.bin"]
@@ -202,13 +219,14 @@ def test_idu_plan_with_migration_and_app(tmp_path: Path) -> None:
         _write_bundle("16MB", "partition-table-idu-16MB.bin", "0xFA0000"),
         [*_conn("no-reset"), "read-flash", "0x11000", "4096", "read.bin"],
         [
-            *_conn("watchdog-reset"),
+            *_conn("no-reset"),
             "write-flash",
             "0x20000",
             "app.bin",
             "0xE000",
             "otadata_ota0.bin",
         ],
+        _RESET_COMMAND,
     ]
     assert fake.flash[0x11000] == _golden_cancfg("SOLO IDU Controller")
     assert fake.flash[0xFA0000] == _BUNDLE_FILES["can_updater.bin"]
@@ -219,7 +237,7 @@ def test_idu_plan_with_migration_and_app(tmp_path: Path) -> None:
 def test_odu_app_goes_to_its_own_ota_0(tmp_path: Path) -> None:
     fake = FakeEsptool()
     flash_solo(_ODU, _PORT, _make_bundle(tmp_path / "bundle"), app=_app(tmp_path), runner=fake)
-    assert fake.calls[-1][-5:] == [
+    assert fake.calls[-2][-5:] == [
         "write-flash",
         "0x80000",
         "app.bin",
@@ -246,6 +264,21 @@ def test_esptool_failure_raises(tmp_path: Path) -> None:
     with pytest.raises(FlashFailedError, match="exited with code 2"):
         flash_solo(_ODU, _PORT, _make_bundle(tmp_path / "b"), runner=fake)
     assert len(fake.calls) == 1
+
+
+def test_failing_final_reset_does_not_fail_the_flash(tmp_path: Path) -> None:
+    fake = FakeEsptool(reset_returncode=1)
+    logs: list[str] = []
+    flash_solo(_ODU, _PORT, _make_bundle(tmp_path / "b"), runner=fake, log=logs.append)
+    assert fake.calls[-1] == _RESET_COMMAND
+    assert "board rebooted (the USB port re-enumerates)" in logs
+
+
+def test_failing_write_still_fails_and_skips_the_reset(tmp_path: Path) -> None:
+    fake = FakeEsptool(returncode=1, reset_returncode=1)
+    with pytest.raises(FlashFailedError, match="exited with code 1"):
+        flash_solo(_ODU, _PORT, _make_bundle(tmp_path / "b"), runner=fake)
+    assert _RESET_COMMAND not in fake.calls
 
 
 def _mutated(mutate: Callable[[dict[str, object]], None]) -> dict[str, object]:
@@ -428,13 +461,13 @@ def test_fetch_downloads_and_unzips_the_bundle(tmp_path: Path, folder: str) -> N
         calls.append(args)
         return gh(args)
 
-    bundle_dir = fetch_solo_bundle("c-cpp-esp32-v1.2.0", tmp_path, run_gh=recording_gh)
+    bundle_dir = fetch_solo_bundle("c-cpp-esp32-v1.2.1", tmp_path, run_gh=recording_gh)
     assert calls[0][:7] == [
         "release",
         "download",
         "-R",
         "XiaoKChen/Embedded-CAN-Bootloaders",
-        "c-cpp-esp32-v1.2.0",
+        "c-cpp-esp32-v1.2.1",
         "-p",
         "esp32s3-can-updater-*.zip",
     ]
@@ -452,9 +485,9 @@ def test_fetch_reports_missing_gh(tmp_path: Path) -> None:
         raise FileNotFoundError("gh")
 
     with pytest.raises(BundleError, match="not on PATH"):
-        fetch_solo_bundle("c-cpp-esp32-v1.2.0", tmp_path, run_gh=no_gh)
+        fetch_solo_bundle("c-cpp-esp32-v1.2.1", tmp_path, run_gh=no_gh)
 
 
 def test_fetch_reports_no_asset(tmp_path: Path) -> None:
     with pytest.raises(BundleError, match="got 0"):
-        fetch_solo_bundle("c-cpp-esp32-v1.2.0", tmp_path, run_gh=_fake_gh())
+        fetch_solo_bundle("c-cpp-esp32-v1.2.1", tmp_path, run_gh=_fake_gh())
