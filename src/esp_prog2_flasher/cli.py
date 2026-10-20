@@ -274,6 +274,8 @@ def _provision_node(args: argparse.Namespace) -> None:
             product,
             boot_cmd_id=boot_cmd_id,
             boot_reply_id=boot_reply_id,
+            # A SOLO product rewrites the whole cancfg sector, so keep its board profile.
+            profile=SOLO_PROFILES.get(product),
             log=print,
         )
     except Exception as exc:  # noqa: BLE001
