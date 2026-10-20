@@ -75,59 +75,113 @@ uv run esp-prog2-flasher          # launch the interactive TUI
 
 ![TUI main screen: probe and RA4M1 detected, all four panels](docs/images/tui-main.png)
 
-> The screenshots show the earlier one-screen layout; a refresh is tracked in #19.
+> The screenshots show an earlier layout; refreshing them for the dashboard is tracked in #19.
 
-The TUI has one tab per flash path, switched with the number keys:
+The TUI is a keyboard-driven dashboard in the style of
+[TTSSH](https://github.com/XiaoKChen/TTSSH):
 
-| Key | Tab | What it does |
+- **Header**: the version, then the probe, the ESP-Prog-2 serial port and the
+  last detected RA4M1 state (`✓ probe ESP-Prog-2 · COM72 · ✓ RA4M1 blank`).
+- **Targets** (left): a tree of what can be flashed, grouped by chip and link:
+  `RA4M1 · SWD` (*Bootloader + config*, *Application*), `PSoC 6 · SWD`
+  (*Full image*), `SOLO boards · USB` (one row per preset) and
+  `ESP-Prog-2 · USB` (*Probe firmware*). Each row shows its image, or a SOLO
+  preset's layout and CAN IDs. `enter`, `→` and `←` fold a group. Below, a
+  `── Recent ──` section lists this session's runs, newest first: target,
+  port or image, `✓`/`✗` and how long ago. Recents are not kept between
+  sessions.
+- **Details** (right): the selection's settings (chip, image path, address or
+  layout, USB names and CAN IDs, port, TWAI pins and bitrate, detect state,
+  last run), then the commands valid for it. Hidden below 80 columns.
+- **Status line**: `✓` success, `!` warning, `✗` error, cleared after a few
+  seconds; a spinner while a job runs.
+- **Footer**: the keys for the current screen.
+
+### Typing and commands
+
+On every list, **typing filters the list**; there are no single-letter action
+keys. Any character except `/` goes into the filter shown in the panel title,
+`backspace` edits it and `esc` clears it. While filtering, the tree turns into
+a flat list of matching targets (with their group) and recents.
+
+**`/` opens the command popup**: a small box listing the commands valid for
+the current screen and selection. The next key runs one and closes the popup;
+`esc` or a second `/` just closes it, and any other key closes it with a
+`no shortcut` message. Dashboard commands (after `/`):
+
+| Key | Command | Offered on |
 |---|---|---|
-| `1` | RA4M1 bootloader | Flash the bootloader `.hex`, optionally with the DFU config block (USB names + boot CAN IDs) |
-| `2` | RA4M1 app | Flash an application `.bin` above the bootloader (`0x4000`, or `0x8000` with **Embassy bootloader** ticked) |
-| `3` | PSoC 6 | Flash the IDU Radar's PSoC 6 — see [below](#psoc-6-idu-radar) |
-| `4` | SOLO board | Flash a SOLO board's CAN bootloader bundle, provision its cancfg, or read it back — see [SOLO boards](#solo-boards-esp32-s3) |
-| `5` | ESP-Prog-2 | Flash the probe's own firmware, or fetch Espressif's official (JTAG) image for reference |
+| `d` | detect the chip over SWD (the PSoC 6 row checks the PSoC 6, the others the RA4M1) | RA4M1 rows, PSoC 6 |
+| `f` | pick the image file in the file browser | RA4M1 rows, PSoC 6 |
+| `e` | edit config: USB device (known, or *Custom…* with its CAN IDs) and manufacturer; on a SOLO row, the manufacturer | RA4M1 bootloader, SOLO |
+| `p` | pick the board's own port | SOLO |
+| `b` | bundle source: a release tag (fetched with `gh`) or an unzipped bundle folder | SOLO |
+| `a` | optional app `.bin` for `ota_0` (SOLO); toggle the Embassy `0x8000` app address (RA4M1 app) | SOLO, RA4M1 app |
+| `m` | toggle migrate-from-stock (erase `0x10000`–`0x1FFFF` first) | SOLO |
+| `n` | provision the preset's cancfg, like `--provision-node` | SOLO |
+| `r` | read the board's config, like `--read-node-config` | SOLO |
+| `g` | get Espressif's official (JTAG) probe image, saved beside the bundled build | ESP-Prog-2 |
+| `l` / `?` / `q` | session log / full help / quit | everywhere |
 
-A status bar under the title always shows the probe, the ESP-Prog-2 serial port
-and the last detected RA4M1 state as a symbol plus text (`✓` ok, `!` warning,
-`✗` missing). Each tab keeps a last-result line (`✓`/`✗`, time, message), every
-finished job also pops a toast, and the shared log sits below the tabs.
+### Flashing
 
-**Every flash, erase or provision asks first.** A dialog lists the chip or board,
-the image(s), the address range or layout and, for config writes, the
-manufacturer, product and CAN IDs. **Enter** confirms, **Esc** cancels. Reading
-a config, detecting and downloading the official image never ask.
+`enter` on a target runs its **wizard**: one field at a time, prefilled with
+the current choice so `enter` accepts it. Completed fields stay listed above
+the current one, `shift+tab` steps back and `esc` backs out. Pick-lists
+(devices, ports, files) filter as you type, and *Browse…* opens the file
+browser.
 
-Keys:
+| Target | The wizard asks |
+|---|---|
+| RA4M1 bootloader | the `.hex` (bundled `dfu_minima.hex` by default); the USB device: *Keep bootloader default* (no config block), a known device (its CAN IDs are fixed from the board table) or *Custom…* (a name and an optional CAN ID pair, both or neither); the USB manufacturer |
+| RA4M1 application | the `.bin`; the base address, `0x4000` (C bootloader) or `0x8000` (Embassy bootloader) |
+| PSoC 6 | the `.hex` (the bundled full image by default); see [below](#psoc-6-idu-radar) |
+| SOLO board | the board's own port, picked from the detected ports (the ESP-Prog-2 bridge is marked as not a SOLO board) or typed; the bundle source. The app, migrate flag and manufacturer come from `/ a`, `/ m` and `/ e` |
+| ESP-Prog-2 | nothing: the bundled `esp-prog2.bin` goes to the ESP-Prog-2's serial port |
 
-| Key | Action | Where |
+The RA4M1 rows need a Detect that found the RA4M1; one runs at start-up and
+`/ d` repeats it.
+
+**Every flash, erase or provision asks first.** The wizard ends on a summary:
+the chip or board, the image(s), the address range or layout and, for config
+writes, the manufacturer, product and CAN IDs. **`y`** starts the write,
+**`n`** or **`esc`** cancels. Reading a config, detecting and downloading the
+official image never ask. A running job shows a spinner, a progress bar and
+its log; `esc` goes back to the dashboard while it keeps running, and no
+other write starts until it finishes. When it ends, the result shows in the
+status line and under Recent; `/ l` shows the whole session log.
+
+### Keybindings
+
+The TUI shows the same table with `/` `?`.
+
+| Where | Key | Action |
 |---|---|---|
-| `1`–`5` | switch tab | global (after `Esc` if you are typing) |
-| `?` / `F1` | key help for the global and current-tab keys | global |
-| `ctrl+p` | command palette: every action, searchable, with its key | global |
-| `ctrl+d` | detect the probe and RA4M1 | global |
-| `ctrl+r` | run the tab's main action (flash target / app / PSoC 6 / SOLO board / probe) | per tab |
-| `ctrl+o` | browse for the tab's file (bootloader, app, PSoC 6 hex, SOLO bundle folder) | tabs 1–4 |
-| `ctrl+b` | toggle the Embassy (`0x8000`) app address | tab 2 |
-| `ctrl+n` | provision the SOLO board's cancfg | tab 4 |
-| `ctrl+g` | read the SOLO board's config (tab 4), get the official probe image (tab 5) | per tab |
-| `ctrl+l` | expand the log to full screen, and back | global |
-| `Esc` | leave a text field (so bare keys work again), close a dialog, or restore the log | global |
-| `q` / `ctrl+q` | quit (`q` only when no text field has focus) | global |
+| Every list | `↑`/`↓`, `pgup`/`pgdn`, `home`/`end` | move |
+| | any character except `/` | filter the list |
+| | `backspace` | edit the filter |
+| | `esc` | clear the filter, or go back one screen |
+| | `/` | open the command popup (`esc` or `/` closes it) |
+| | `ctrl+c` / `ctrl+q` | quit (works everywhere) |
+| | `/` `l` / `/` `?` / `/` `q` | session log / full help / quit |
+| Dashboard | `enter` | run the target's wizard, fold a group, or rerun a recent run |
+| | `→` / `←` | expand / collapse a group; `←` on a target selects its group |
+| | `/` `d` `f` `e` `p` `b` `a` `m` `n` `r` `g` | the commands above |
+| Wizard | `enter` | accept the field (or the highlighted choice) and go on |
+| | `shift+tab` | previous field |
+| | `esc` | back out to where the wizard started |
+| y/n questions | `y` / `n` or `esc` | start the write / cancel |
+| Run view | `esc` | back to the dashboard; the job keeps running |
+| Folder browser | `enter` | open the folder, or pick the file |
+| | `←` or `backspace` on an empty filter | parent folder (a drive list at a Windows drive root) |
+| | `/` `.` | use this folder (when picking a folder) |
+| | `/` `t` | type a path (`~` is expanded) |
+| Log, help | `↑`/`↓`, `pgup`/`pgdn` | scroll |
+| | `esc` | back |
 
-The `ctrl` keys work even while a text field has focus; bare keys (`1`–`5`, `?`,
-`q`) type into a focused field instead, so press `Esc` first. The footer shows
-only the keys that apply to the current tab. "Flash target" and "Flash app" stay
-disabled until an RA4M1 is detected (Detect only probes for the RA4M1).
+In text fields every key, `/` included, is typed literally.
 
 ![TUI with the IDU Radar device picked: boot CAN IDs filled and locked](docs/images/tui-device.png)
-
-The target panel also has a **USB manufacturer** field (defaults to
-`Normal Corporation`) and a **USB device** dropdown. Pick a known device to write
-its config block (DFU names + the device's fixed boot CAN IDs) into the target's
-data flash along with the bootloader; the CAN ID fields fill in and lock. Pick
-**Custom…** to type your own device name and (optionally) enter a boot CAN ID
-pair — leave both ID fields blank to keep the bootloader defaults. Leave the
-dropdown on "keep bootloader default" to skip the config write entirely.
 
 ### Headless / scripting
 
@@ -185,9 +239,9 @@ ESP-Prog-2 using pyOCD's built-in `cy8c6xx5` target (no CMSIS pack needed).
 
 - **CLI:** `--detect --psoc6` to check the link, `--flash-psoc6` to flash
   (`--hex PATH` overrides the bundled image, `--freq` sets the SWD clock).
-- **TUI:** the *PSoC 6* tab (key `3`, then `ctrl+r`) flashes the bundled hex or one
-  picked with *Browse* (`ctrl+o`). It is not gated on detection (the TUI's Detect checks the RA4M1
-  only), so use `--detect --psoc6` to check the link first if in doubt.
+- **TUI:** `enter` on *PSoC 6 · SWD › Full image* flashes the bundled hex or one
+  picked with `/ f`. It is not gated on detection; `/ d` on that row checks the
+  PSoC 6 link first (like `--detect --psoc6`).
 - **Wiring (3.3 V target):** probe SWDIO, SWCLK, GND and VTref to the board's SWD
   header; also XRES if the header exposes it.
 - **Image:** `hex/psoc6_radar_full_image.hex` is `full_image.hex` (bootloader + App1)
@@ -281,13 +335,14 @@ first runs.
 - `--bundle-tag` needs the [GitHub CLI](https://cli.github.com/) (`gh auth
   login`). A tag that is not published yet fails with a clear "not found"
   error; pass `--bundle` instead.
-- **TUI:** the *SOLO board* tab (key `4`) does the same. Pick the preset, type the
-  board's own port (it is never filled in for you; a hint names the ESP-Prog-2's
-  port so you skip it), then **Flash board** (`ctrl+r`) with the release tag or a
-  local unzipped bundle folder (`ctrl+o`), an optional app `.bin` and the
-  migrate-stock box. **Provision cancfg** (`ctrl+n`) writes only the preset's cancfg
-  like `--provision-node`; **Read config** (`ctrl+g`) shows the decoded block or
-  "unprovisioned" like `--read-node-config`.
+- **TUI:** each preset is a row under *SOLO boards · USB*; `enter` on it does the
+  same. The wizard asks for the board's own port (picked from the detected ports,
+  where the ESP-Prog-2's bridge port is marked as not a SOLO board, or typed) and
+  the bundle source (the release tag or a local unzipped folder). The optional app
+  `.bin` (`/ a`), migrate-stock (`/ m`) and manufacturer (`/ e`) are set from the
+  dashboard and shown in the summary. `/ n` writes only the preset's cancfg like
+  `--provision-node`; `/ r` shows the decoded block or "unprovisioned" like
+  `--read-node-config`.
 
 ## What it does
 
@@ -323,8 +378,8 @@ ESP-PROG-2-PY-CLI/
 │   ├── flasher.py     # pyOCD (target) + esptool (probe) logic — no UI deps
 │   ├── dfu_config.py  # encode the device config block (DFU names + boot CAN IDs)
 │   ├── board_profile.py  # ESP32-S3 board-profile record, cancfg image, SOLO presets
-│   ├── app.py         # Textual TUI: tabs, key map, flasher wiring
-│   ├── tui/screens.py # TUI dialogs: file picker, confirm, key help
+│   ├── app.py         # Textual TUI: session state, "/" commands, flasher jobs
+│   ├── tui/           # TUI: theme, dashboard, "/" popup, wizards, file browser
 │   ├── cli.py         # argparse entry point (TUI by default)
 │   └── __main__.py    # `python -m esp_prog2_flasher`
 ├── hex/             # bundled dfu_minima.hex (RA4M1 bootloader) + psoc6_radar_full_image.hex; override with --hex
