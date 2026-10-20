@@ -75,14 +75,49 @@ uv run esp-prog2-flasher          # launch the interactive TUI
 
 ![TUI main screen: probe and RA4M1 detected, all four panels](docs/images/tui-main.png)
 
-TUI keys: **d** detect, **f** flash target (RA4M1), **a** flash application
-`.bin`, **6** flash the PSoC 6, **p** flash the ESP-Prog-2 firmware, **u** fetch
-Espressif's official (JTAG) image for reference, **q** quit. "Flash target" and
-"Flash app" stay disabled until an RA4M1 is detected (Detect only probes for the
-RA4M1). The **Application (RA4M1 over SWD)** panel (pick a `.bin`, then Flash app)
-writes to the app region above the bootloader (`0x4000`, or `0x8000` with the
-**Embassy bootloader** box ticked). The **PSoC 6 (IDU Radar over SWD)** panel
-flashes the PSoC 6 — see [below](#psoc-6-idu-radar).
+> The screenshots show the earlier one-screen layout; a refresh is tracked in #19.
+
+The TUI has one tab per flash path, switched with the number keys:
+
+| Key | Tab | What it does |
+|---|---|---|
+| `1` | RA4M1 bootloader | Flash the bootloader `.hex`, optionally with the DFU config block (USB names + boot CAN IDs) |
+| `2` | RA4M1 app | Flash an application `.bin` above the bootloader (`0x4000`, or `0x8000` with **Embassy bootloader** ticked) |
+| `3` | PSoC 6 | Flash the IDU Radar's PSoC 6 — see [below](#psoc-6-idu-radar) |
+| `4` | SOLO board | Flash a SOLO board's CAN bootloader bundle, provision its cancfg, or read it back — see [SOLO boards](#solo-boards-esp32-s3) |
+| `5` | ESP-Prog-2 | Flash the probe's own firmware, or fetch Espressif's official (JTAG) image for reference |
+
+A status bar under the title always shows the probe, the ESP-Prog-2 serial port
+and the last detected RA4M1 state as a symbol plus text (`✓` ok, `!` warning,
+`✗` missing). Each tab keeps a last-result line (`✓`/`✗`, time, message), every
+finished job also pops a toast, and the shared log sits below the tabs.
+
+**Every flash, erase or provision asks first.** A dialog lists the chip or board,
+the image(s), the address range or layout and, for config writes, the
+manufacturer, product and CAN IDs. **Enter** confirms, **Esc** cancels. Reading
+a config, detecting and downloading the official image never ask.
+
+Keys:
+
+| Key | Action | Where |
+|---|---|---|
+| `1`–`5` | switch tab | global (after `Esc` if you are typing) |
+| `?` / `F1` | key help for the global and current-tab keys | global |
+| `ctrl+p` | command palette: every action, searchable, with its key | global |
+| `ctrl+d` | detect the probe and RA4M1 | global |
+| `ctrl+r` | run the tab's main action (flash target / app / PSoC 6 / SOLO board / probe) | per tab |
+| `ctrl+o` | browse for the tab's file (bootloader, app, PSoC 6 hex, SOLO bundle folder) | tabs 1–4 |
+| `ctrl+b` | toggle the Embassy (`0x8000`) app address | tab 2 |
+| `ctrl+n` | provision the SOLO board's cancfg | tab 4 |
+| `ctrl+g` | read the SOLO board's config (tab 4), get the official probe image (tab 5) | per tab |
+| `ctrl+l` | expand the log to full screen, and back | global |
+| `Esc` | leave a text field (so bare keys work again), close a dialog, or restore the log | global |
+| `q` / `ctrl+q` | quit (`q` only when no text field has focus) | global |
+
+The `ctrl` keys work even while a text field has focus; bare keys (`1`–`5`, `?`,
+`q`) type into a focused field instead, so press `Esc` first. The footer shows
+only the keys that apply to the current tab. "Flash target" and "Flash app" stay
+disabled until an RA4M1 is detected (Detect only probes for the RA4M1).
 
 ![TUI with the IDU Radar device picked: boot CAN IDs filled and locked](docs/images/tui-device.png)
 
@@ -150,8 +185,8 @@ ESP-Prog-2 using pyOCD's built-in `cy8c6xx5` target (no CMSIS pack needed).
 
 - **CLI:** `--detect --psoc6` to check the link, `--flash-psoc6` to flash
   (`--hex PATH` overrides the bundled image, `--freq` sets the SWD clock).
-- **TUI:** the *PSoC 6* panel (key `6`) flashes the bundled hex or one picked with
-  *Browse*. It is not gated on detection (the TUI's Detect checks the RA4M1
+- **TUI:** the *PSoC 6* tab (key `3`, then `ctrl+r`) flashes the bundled hex or one
+  picked with *Browse* (`ctrl+o`). It is not gated on detection (the TUI's Detect checks the RA4M1
   only), so use `--detect --psoc6` to check the link first if in doubt.
 - **Wiring (3.3 V target):** probe SWDIO, SWCLK, GND and VTref to the board's SWD
   header; also XRES if the header exposes it.
@@ -246,7 +281,13 @@ first runs.
 - `--bundle-tag` needs the [GitHub CLI](https://cli.github.com/) (`gh auth
   login`). A tag that is not published yet fails with a clear "not found"
   error; pass `--bundle` instead.
-- The TUI has no SOLO panel yet (issue #13).
+- **TUI:** the *SOLO board* tab (key `4`) does the same. Pick the preset, type the
+  board's own port (it is never filled in for you; a hint names the ESP-Prog-2's
+  port so you skip it), then **Flash board** (`ctrl+r`) with the release tag or a
+  local unzipped bundle folder (`ctrl+o`), an optional app `.bin` and the
+  migrate-stock box. **Provision cancfg** (`ctrl+n`) writes only the preset's cancfg
+  like `--provision-node`; **Read config** (`ctrl+g`) shows the decoded block or
+  "unprovisioned" like `--read-node-config`.
 
 ## What it does
 
@@ -282,7 +323,8 @@ ESP-PROG-2-PY-CLI/
 │   ├── flasher.py     # pyOCD (target) + esptool (probe) logic — no UI deps
 │   ├── dfu_config.py  # encode the device config block (DFU names + boot CAN IDs)
 │   ├── board_profile.py  # ESP32-S3 board-profile record, cancfg image, SOLO presets
-│   ├── app.py         # Textual TUI
+│   ├── app.py         # Textual TUI: tabs, key map, flasher wiring
+│   ├── tui/screens.py # TUI dialogs: file picker, confirm, key help
 │   ├── cli.py         # argparse entry point (TUI by default)
 │   └── __main__.py    # `python -m esp_prog2_flasher`
 ├── hex/             # bundled dfu_minima.hex (RA4M1 bootloader) + psoc6_radar_full_image.hex; override with --hex
