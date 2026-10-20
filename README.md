@@ -210,10 +210,10 @@ falls back to TX 4, RX 5, 250 kbit/s and no holds.
 | `idu` | `SOLO IDU Controller` | `idu-16MB` | 16 MB | 6 / 7 | 250k | GPIO3 | `0x07`/`0x08` |
 
 ```sh
-# Fetch the bundle from the default release (c-cpp-esp32-v1.2.0) with gh, then flash.
+# Fetch the bundle from the default release (c-cpp-esp32-v1.2.1) with gh, then flash.
 uv run esp-prog2-flasher --flash-solo odu --port COM7
 # Use an unzipped bundle on disk, or another release.
-uv run esp-prog2-flasher --flash-solo idu --port COM8 --bundle path/to/esp32s3-can-updater-1.2.0
+uv run esp-prog2-flasher --flash-solo idu --port COM8 --bundle path/to/esp32s3-can-updater-1.2.1
 uv run esp-prog2-flasher --flash-solo idu --port COM8 --bundle-tag c-cpp-esp32-vX.Y.Z
 # Also install an app in ota_0; erase a stock Arduino layout's leftovers first.
 uv run esp-prog2-flasher --flash-solo odu --port COM7 --bundle bundle/ --app firmware.bin --migrate-stock
@@ -233,9 +233,11 @@ Flash sequence, each step one esptool run:
    `0x20000` on idu-16MB) plus an otadata image selecting `ota_0`. Without
    `--app` the board boots the CAN updater.
 
-Every step but the last runs with `--after no-reset`. The last runs with
-`--after watchdog-reset`, because the RTS hard reset does not reboot the chip
-over USB-Serial-JTAG. The manifest (format 1, esp32s3, dio/80m, `cancfg` at
+Every step runs with `--after no-reset`. A final `chip-id` call with
+`--before no-reset --after watchdog-reset` then reboots the board, because the
+RTS hard reset does not reboot the chip over USB-Serial-JTAG. The USB port
+vanishes as the chip resets, so esptool exits non-zero there; the tool ignores
+that exit code and logs "board rebooted (the USB port re-enumerates)". The manifest (format 1, esp32s3, dio/80m, `cancfg` at
 `0x11000`), the app image and the device names are all checked before esptool
 first runs.
 
