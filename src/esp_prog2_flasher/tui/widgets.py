@@ -123,7 +123,7 @@ class ChromeWidget(Widget):
 
 
 class HeaderLine(ChromeWidget):
-    """``ESP-PROG-2 FLASHER v2.2.0`` on the left, muted probe/serial/target state on the right."""
+    """``ESP-PROG-2 FLASHER vX.Y.Z`` on the left, muted probe/serial/target state on the right."""
 
     def render(self) -> RenderableType:
         left = Text(APP_TITLE, style=self.style("accent"))
