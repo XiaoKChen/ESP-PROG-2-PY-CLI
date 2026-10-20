@@ -17,7 +17,7 @@ ESP-Prog-2's ESP32-S3, with two changes from Espressif's stock image:
 
 ## Flashing the ESP-Prog-2
 
-Use the TUI ("Flash ESP-Prog-2", key `p`) or the CLI:
+Use the TUI (*ESP-Prog-2 · USB › Probe firmware*, then `enter`) or the CLI:
 
 ```sh
 uv run esp-prog2-flasher --flash-probe        # flashes the bundled esp-prog2.bin
@@ -27,8 +27,8 @@ uv run esp-prog2-flasher --flash-probe        # flashes the bundled esp-prog2.bi
 reflash itself over its CDC port):
 
 1. Hold **BOOT**, tap **RESET** (or hold BOOT while plugging in USB).
-2. It re-enumerates as an ESP32-S3 ROM device (new COM port / PID); the TUI's
-   "Serial" line flips to "download mode".
+2. It re-enumerates as an ESP32-S3 ROM device (new COM port / PID); the TUI
+   confirm step then shows the port as "download mode".
 3. Run the flash; esptool writes `esp-prog2.bin` at `0x0` and resets.
 
 After flashing it should enumerate as **CMSIS-DAP** (pyOCD sees it) with **no
@@ -56,7 +56,7 @@ docker run --rm -v C:\esp\esp-usb-bridge:/project -w /project espressif/idf:rele
 
 ## The official image
 
-`Get official (JTAG)` / `--update-probe-fw` downloads Espressif's stock
+`/ g` on the probe row in the TUI or `--update-probe-fw` downloads Espressif's stock
 `esp-prog2.bin` as **`esp-prog2-official-jtag.bin`** (kept separate so it never
 overwrites the SWD build). That image is **JTAG + MSC** — flashing it
 (`--flash-probe --probe-bin firmware/esp-prog2-official-jtag.bin`) will disable
