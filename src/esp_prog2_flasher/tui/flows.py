@@ -303,7 +303,9 @@ def _device_steps(settings: Settings, answers: Answers) -> list[Step]:
 def _port_steps(
     settings: Settings, ports: Sequence[flasher.SerialPortInfo], answers: Answers
 ) -> list[Step]:
-    choices = [Choice(port.device, port.device, port_label(port)) for port in ports]
+    # The ESP-Prog-2's bridge is never the board: list it last so the cursor never starts on it.
+    ordered = sorted(ports, key=lambda port: port.is_esp_prog_bridge)
+    choices = [Choice(port.device, port.device, port_label(port)) for port in ordered]
     note = "not in the list" if ports else "no serial ports detected"
     choices.append(Choice(TYPE_PORT, "Type a port…", note))
     steps: list[Step] = [

@@ -223,7 +223,9 @@ async def walk_solo_wizard_to_confirm(app: FlasherApp, pilot: Pilot[None]) -> No
     await pilot.press("enter")
     step = wizard(app).step
     assert isinstance(step, ChoiceStep) and step.key == "port"
-    assert [row.note for row in wizard(app).choice_list.rows][0].startswith("ESP-Prog-2 bridge")
+    rows = wizard(app).choice_list.rows
+    assert [row.key for row in rows[:2]] == [SOLO_PORT, BRIDGE_PORT]  # the bridge never first
+    assert rows[1].note.startswith("ESP-Prog-2 bridge")
     await type_text(pilot, SOLO_PORT.lower())
     await pilot.press("enter")
     assert wizard(app).step is not None and wizard(app).step.key == "bundle"
