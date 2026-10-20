@@ -1,9 +1,11 @@
-"""Textual TUI: flash the RA4M1 bootloader/app, the PSoC 6 image, or the ESP-Prog-2 firmware.
+"""Textual TUI: flash the RA4M1, the PSoC 6, a SOLO board (ESP32-S3) or the ESP-Prog-2 itself.
 
 FlasherApp shows one tab per flash path — RA4M1 bootloader + DFU config, RA4M1 application,
-PSoC 6 (IDU Radar) and the ESP-Prog-2's own firmware — under a persistent probe/serial/target
-status bar, with a shared progress bar and a toggleable log. It sits on top of flasher.py and
-is launched by cli.py when no flags are given.
+PSoC 6 (IDU Radar), SOLO board (bundle flash, cancfg provisioning and read-back) and the
+ESP-Prog-2's own firmware — under a persistent probe/serial/target status bar, with a shared
+progress bar and a toggleable log. It sits on top of flasher.py and is launched by cli.py when
+no flags are given; the SOLO tab calls flasher exactly as cli.py's --flash-solo,
+--provision-node and --read-node-config do for a SOLO preset.
 
 Owns:        the tab layout, the key map (GLOBAL_BINDINGS + TAB_BINDINGS, the single source
              the footer, the help screen and the command palette are all derived from), the
@@ -15,24 +17,27 @@ Invariants:  a bare printable key never fires while an Input has focus (the Inpu
              it); only ctrl/function-key bindings are priority bindings, and none of them
              runs while a modal screen is open. No flash, erase or provision write starts
              before ConfirmScreen returns True. Flash target and Flash app stay disabled
-             until a Detect finds a flashable RA4M1.
+             until a Detect finds a flashable RA4M1. The SOLO port is never filled in for the
+             user: auto-detect finds the ESP-Prog-2, not the board.
 Concurrency: flasher calls run in Textual thread workers (@work(thread=True)); results and
              progress reach the UI only via call_from_thread. Every write and serial read
              runs in the exclusive "flash" worker group, and no new one (nor a Detect) starts
              while one is running.
-Depends on:  flasher.py, dfu_config.py, tui/screens.py, textual, rich.
+Depends on:  flasher.py, dfu_config.py, board_profile.py, tui/screens.py, textual, rich.
 See also:    cli.py, tests/test_app.py
 """
 
 from __future__ import annotations
 
 import logging
+import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import ClassVar, Final, Literal
 
+from rich.markup import escape
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult, SystemCommand
@@ -56,6 +61,7 @@ from textual.widgets import (
 )
 
 from . import __version__, flasher
+from .board_profile import CANCFG_IMAGE_SIZE, SOLO_PROFILES, Bitrate, BoardProfile
 from .dfu_config import (
     CONFIG_ADDRESS,
     DEFAULT_BOOT_CMD_ID,
@@ -64,6 +70,7 @@ from .dfu_config import (
     DEVICE_CAN_IDS,
     DEVICE_NAMES,
     MAX_CAN_ID,
+    DfuConfig,
 )
 from .flasher import DetectResult, TargetState
 from .tui.screens import ConfirmScreen, FilePickerScreen, HelpRow, HelpScreen, SummaryRow
@@ -80,7 +87,7 @@ CUSTOM_DEVICE_LABEL: str = "Custom…"
 # (vs. the 16 KiB C bootloader's flasher.APP_BASE_ADDRESS == 0x4000).
 EMBASSY_APP_BASE_ADDRESS: Final[int] = 0x8000
 
-TabId = Literal["boot", "app", "psoc6", "probe"]
+TabId = Literal["boot", "app", "psoc6", "solo", "probe"]
 StatusLevel = Literal["ok", "warn", "err", "busy"]
 StatusKey = Literal["probe", "serial", "target"]
 
@@ -99,6 +106,12 @@ _TARGET_STATUS: Final[dict[TargetState, tuple[StatusLevel, str]]] = {
     TargetState.CONNECTED_BLANK: ("ok", "Target: RA4M1 connected (blank)"),
 }
 _FLASH_GROUP: Final[str] = "flash"
+_BITRATE_LABELS: Final[dict[Bitrate, str]] = {
+    Bitrate.KBPS_125: "125 kbit/s",
+    Bitrate.KBPS_250: "250 kbit/s",
+    Bitrate.KBPS_500: "500 kbit/s",
+    Bitrate.MBPS_1: "1 Mbit/s",
+}
 _LOG_EXPANDED_CLASS: Final[str] = "-log-expanded"
 
 
@@ -116,6 +129,7 @@ TABS: Final[tuple[TabSpec, ...]] = (
     TabSpec("boot", "1", "RA4M1 bootloader", "RA4M1 bootloader + DFU config"),
     TabSpec("app", "2", "RA4M1 app", "RA4M1 application"),
     TabSpec("psoc6", "3", "PSoC 6", "PSoC 6 (IDU Radar)"),
+    TabSpec("solo", "4", "SOLO board", "SOLO board (ESP32-S3)"),
     TabSpec("probe", "5", "ESP-Prog-2", "ESP-Prog-2 probe firmware"),
 )
 TAB_TITLES: Final[dict[TabId, str]] = {tab.id: tab.title for tab in TABS}
@@ -151,6 +165,12 @@ TAB_BINDINGS: Final[dict[TabId, tuple[Binding, ...]]] = {
     "psoc6": (
         Binding("ctrl+r", "flash_psoc6", "Flash", priority=True),
         Binding("ctrl+o", "browse_psoc6", "Browse", priority=True),
+    ),
+    "solo": (
+        Binding("ctrl+r", "flash_solo", "Flash", priority=True),
+        Binding("ctrl+n", "provision_solo", "Provision", priority=True),
+        Binding("ctrl+g", "read_solo_config", "Read", priority=True),
+        Binding("ctrl+o", "browse_solo_bundle", "Bundle", priority=True),
     ),
     "probe": (
         Binding("ctrl+r", "flash_probe", "Flash", priority=True),
@@ -213,6 +233,7 @@ class FlasherApp(App[None]):
     .buttons { height: auto; margin: 1 0 0 0; }
     .buttons Button { margin: 0 1 0 0; }
     #boot_reply_label { width: auto; padding: 0 1; }
+    #solo_port_hint { width: auto; color: $warning; padding: 0 0 0 1; }
     .result { height: auto; margin: 1 0 0 0; }
     .ok { color: $success; text-style: bold; }
     .warn { color: $warning; text-style: bold; }
@@ -260,6 +281,8 @@ class FlasherApp(App[None]):
                 yield from self._compose_app()
             with TabPane(self._tab_label("psoc6"), id="psoc6"):
                 yield from self._compose_psoc6()
+            with TabPane(self._tab_label("solo"), id="solo"):
+                yield from self._compose_solo()
             with TabPane(self._tab_label("probe"), id="probe"):
                 yield from self._compose_probe()
         with Horizontal(id="progress_row"):
@@ -357,6 +380,57 @@ class FlasherApp(App[None]):
             with Horizontal(classes="buttons"):
                 yield Button("Flash PSoC 6", id="flash_psoc6", variant="success", compact=True)
             yield Static("No result yet.", id="psoc6_result", classes="result")
+
+    def _compose_solo(self) -> ComposeResult:
+        erase_end = flasher.STOCK_MIGRATION_ERASE_OFFSET + flasher.STOCK_MIGRATION_ERASE_SIZE - 1
+        with VerticalScroll(classes="pane"):
+            with Horizontal(classes="row"):
+                yield Label("Board preset:")
+                yield Select(
+                    [(product, product) for product in SOLO_PROFILES],
+                    value=next(iter(SOLO_PROFILES)),
+                    allow_blank=False,
+                    id="solo_preset",
+                    compact=True,
+                )
+            with Horizontal(classes="row"):
+                yield Label("Board port:")
+                yield Input(
+                    placeholder="the board's own USB port, e.g. COM7", id="solo_port", compact=True
+                )
+                yield Static("", id="solo_port_hint")
+            with Horizontal(classes="row"):
+                yield Label("Bundle release:")
+                yield Input(value=flasher.DEFAULT_SOLO_BUNDLE_TAG, id="solo_tag", compact=True)
+            with Horizontal(classes="row"):
+                yield Label("…or bundle folder:")
+                yield Input(
+                    placeholder="unzipped bundle (overrides the release)",
+                    id="solo_bundle",
+                    compact=True,
+                )
+                yield Button("Browse", id="browse_solo_bundle", compact=True)
+            with Horizontal(classes="row"):
+                yield Label("App (.bin):")
+                yield Input(placeholder="optional, written to ota_0", id="solo_app", compact=True)
+                yield Button("Browse", id="browse_solo_app", compact=True)
+            with Horizontal(classes="row"):
+                yield Label("USB manufacturer:")
+                yield Input(value=DEFAULT_MANUFACTURER, id="solo_mfr", compact=True)
+            with Horizontal(classes="row"):
+                yield Checkbox(
+                    f"Migrate from stock (erase 0x{flasher.STOCK_MIGRATION_ERASE_OFFSET:X}"
+                    f"–0x{erase_end:X} first)",
+                    id="solo_migrate",
+                    compact=True,
+                )
+            with Horizontal(classes="buttons"):
+                yield Button("Flash board", id="flash_solo", variant="warning", compact=True)
+                yield Button(
+                    "Provision cancfg", id="provision_solo", variant="success", compact=True
+                )
+                yield Button("Read config", id="read_solo_config", variant="primary", compact=True)
+            yield Static("No result yet.", id="solo_result", classes="result")
 
     def _compose_probe(self) -> ComposeResult:
         with VerticalScroll(classes="pane"):
@@ -461,6 +535,12 @@ class FlasherApp(App[None]):
             "boot",
             "palette only",
             self._on_tab("boot", lambda: self._main.query_one("#prod_select", Select).focus()),
+        )
+        yield (
+            "Browse app .bin (SOLO board)",
+            "solo",
+            "palette only",
+            self._on_tab("solo", self.action_browse_solo_app),
         )
 
     def _on_tab(self, tab: TabId, action: Callable[[], object]) -> Callable[[], None]:
@@ -729,6 +809,143 @@ class FlasherApp(App[None]):
 
         self._confirm_then("Flash the PSoC 6", rows, start)
 
+    def _solo_port(self) -> str | None:
+        port = self._main.query_one("#solo_port", Input).value.strip()
+        if not port:
+            self._write_log(
+                "[red]Enter the board's own serial port.[/red] It is not auto-detected: "
+                "auto-detect finds the ESP-Prog-2, not the board."
+            )
+            return None
+        return port
+
+    def _solo_manufacturer(self) -> str | None:
+        manufacturer = self._main.query_one("#solo_mfr", Input).value.strip()
+        if not manufacturer:
+            self._write_log("[red]Enter a USB manufacturer.[/red]")
+            return None
+        return manufacturer
+
+    def _solo_profile(self) -> BoardProfile:
+        return SOLO_PROFILES[str(self._main.query_one("#solo_preset", Select).value)]
+
+    @staticmethod
+    def _solo_config_rows(profile: BoardProfile, manufacturer: str) -> list[SummaryRow]:
+        record = profile.record
+        return [
+            ("Manufacturer", manufacturer),
+            ("Product", profile.product),
+            ("CAN IDs", _can_ids_text(*profile.boot_ids)),
+            (
+                "Profile",
+                f"TWAI tx GPIO{record.twai_tx_gpio} rx GPIO{record.twai_rx_gpio}, "
+                f"{_BITRATE_LABELS[record.bitrate]}, hold-LOW mask 0x{record.hold_low_mask:X}",
+            ),
+        ]
+
+    def action_flash_solo(self) -> None:
+        if not self._ready_to_start():
+            return
+        port = self._solo_port()
+        manufacturer = self._solo_manufacturer() if port else None
+        if port is None or manufacturer is None:
+            return
+        profile = self._solo_profile()
+        bundle_text = self._main.query_one("#solo_bundle", Input).value.strip()
+        bundle_dir = Path(bundle_text) if bundle_text else None
+        if bundle_dir is not None and not bundle_dir.is_dir():
+            self._write_log(f"[red]Bundle folder not found:[/red] {escape(str(bundle_dir))}")
+            return
+        tag = (
+            self._main.query_one("#solo_tag", Input).value.strip()
+            or flasher.DEFAULT_SOLO_BUNDLE_TAG
+        )
+        app_text = self._main.query_one("#solo_app", Input).value.strip()
+        app = Path(app_text) if app_text else None
+        if app is not None and not app.is_file():
+            self._write_log(f"[red]App image not found:[/red] {escape(str(app))}")
+            return
+        migrate_stock = self._main.query_one("#solo_migrate", Checkbox).value
+
+        rows: list[SummaryRow] = [
+            ("Board", f"{profile.product} ({profile.layout}, {profile.flash_size} flash)"),
+            ("Port", port),
+            ("Bundle", str(bundle_dir) if bundle_dir else f"release {tag} (fetched with gh)"),
+            (
+                "Writes",
+                "bootloader, partition table, otadata, CAN updater and cancfg at the "
+                "bundle manifest's offsets",
+            ),
+            (
+                "App",
+                f"{app} at ota_0, selected in otadata"
+                if app
+                else "none — the board boots the CAN updater",
+            ),
+        ]
+        if migrate_stock:
+            erase_start = flasher.STOCK_MIGRATION_ERASE_OFFSET
+            erase_end = erase_start + flasher.STOCK_MIGRATION_ERASE_SIZE - 1
+            rows.append(("Erase first", f"0x{erase_start:X}–0x{erase_end:X} (stock leftovers)"))
+        rows += self._solo_config_rows(profile, manufacturer)
+
+        def start() -> None:
+            self._busy(True)
+            self._set_progress(0)
+            self._write_log(f"[b]Flashing {profile.product}[/b] via {escape(port)} …")
+            self.flash_solo_worker(profile, port, bundle_dir, tag, app, migrate_stock, manufacturer)
+
+        self._confirm_then(f"Flash the {profile.product}", rows, start)
+
+    def action_provision_solo(self) -> None:
+        if not self._ready_to_start():
+            return
+        port = self._solo_port()
+        manufacturer = self._solo_manufacturer() if port else None
+        if port is None or manufacturer is None:
+            return
+        profile = self._solo_profile()
+        rows: list[SummaryRow] = [
+            ("Board", profile.product),
+            ("Port", port),
+            (
+                "Writes",
+                f"{CANCFG_IMAGE_SIZE}-byte cancfg image (v2 block + board profile) where the "
+                f"node's partition table puts cancfg (else 0x{flasher.DEFAULT_CANCFG_OFFSET:X})",
+            ),
+            *self._solo_config_rows(profile, manufacturer),
+        ]
+
+        def start() -> None:
+            self._busy(True)
+            self._set_progress(0)
+            self._write_log(f"[b]Provisioning cancfg[/b] on {escape(port)} …")
+            self.provision_solo_worker(port, manufacturer, profile)
+
+        self._confirm_then(f"Provision the {profile.product}", rows, start, verb="Provision")
+
+    def action_read_solo_config(self) -> None:
+        if not self._ready_to_start():
+            return
+        port = self._solo_port()
+        if port is None:
+            return
+        self._busy(True)
+        self._write_log(f"[b]Reading cancfg[/b] from {escape(port)} …")
+        self.read_solo_config_worker(port)
+
+    def action_browse_solo_bundle(self) -> None:
+        self._browse("solo_bundle", "", "Select unzipped SOLO bundle folder", select_dirs=True)
+
+    def action_browse_solo_app(self) -> None:
+        self._browse("solo_app", ".bin", "Select SOLO app .bin")
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        # A local bundle folder replaces the release download, as --bundle and --bundle-tag
+        # exclude each other in cli.py.
+        if event.input.id == "solo_bundle":
+            self._main.query_one("#solo_tag", Input).disabled = bool(event.value.strip())
+
     def _browse(self, input_id: str, suffix: str, title: str, select_dirs: bool = False) -> None:
         field = self._main.query_one(f"#{input_id}", Input)
 
@@ -790,6 +1007,11 @@ class FlasherApp(App[None]):
             "browse_hex": self.action_browse_hex,
             "browse_app": self.action_browse_app,
             "browse_psoc6": self.action_browse_psoc6,
+            "flash_solo": self.action_flash_solo,
+            "provision_solo": self.action_provision_solo,
+            "read_solo_config": self.action_read_solo_config,
+            "browse_solo_bundle": self.action_browse_solo_bundle,
+            "browse_solo_app": self.action_browse_solo_app,
             "quit": self.exit,
         }
         handler = handlers.get(event.button.id or "")
@@ -821,7 +1043,7 @@ class FlasherApp(App[None]):
                 hex_path,
                 frequency=self._frequency,
                 progress=lambda f: self.call_from_thread(self._set_progress, f * 100.0),
-                log=lambda m: self.call_from_thread(self._write_log, m),
+                log=self._worker_log,
                 manufacturer=manufacturer,
                 product=product,
                 boot_cmd_id=boot_cmd_id,
@@ -840,7 +1062,7 @@ class FlasherApp(App[None]):
                 base_address=base_address,
                 frequency=self._frequency,
                 progress=lambda f: self.call_from_thread(self._set_progress, f * 100.0),
-                log=lambda m: self.call_from_thread(self._write_log, m),
+                log=self._worker_log,
             )
             self.call_from_thread(self._flash_done, "app", True, "Application flashed and reset.")
         except Exception as exc:  # noqa: BLE001
@@ -856,7 +1078,7 @@ class FlasherApp(App[None]):
                 hex_path,
                 frequency=self._frequency,
                 progress=lambda f: self.call_from_thread(self._set_progress, f * 100.0),
-                log=lambda m: self.call_from_thread(self._write_log, m),
+                log=self._worker_log,
             )
             self.call_from_thread(self._flash_done, "psoc6", True, "PSoC 6 flashed and reset.")
         except Exception as exc:  # noqa: BLE001
@@ -870,7 +1092,7 @@ class FlasherApp(App[None]):
                 fw,
                 port=port,
                 progress=lambda f: self.call_from_thread(self._set_progress, f),
-                log=lambda m: self.call_from_thread(self._write_log, m),
+                log=self._worker_log,
             )
             self.call_from_thread(self._flash_done, "probe", True, "ESP-Prog-2 firmware flashed.")
         except Exception as exc:  # noqa: BLE001
@@ -882,13 +1104,84 @@ class FlasherApp(App[None]):
     @work(thread=True, exclusive=True, group=_FLASH_GROUP)
     def download_fw_worker(self) -> None:
         try:
-            dest = flasher.download_probe_firmware(
-                log=lambda m: self.call_from_thread(self._write_log, m)
-            )
+            dest = flasher.download_probe_firmware(log=self._worker_log)
             self.call_from_thread(self._download_done, True, f"Saved {dest}")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Download firmware worker failed")
             self.call_from_thread(self._download_done, False, f"Download failed: {exc!r}")
+
+    @work(thread=True, exclusive=True, group=_FLASH_GROUP)
+    def flash_solo_worker(
+        self,
+        profile: BoardProfile,
+        port: str,
+        bundle_dir: Path | None,
+        tag: str,
+        app: Path | None,
+        migrate_stock: bool,
+        manufacturer: str,
+    ) -> None:
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                bundle = bundle_dir or flasher.fetch_solo_bundle(
+                    tag, Path(tmp), log=self._worker_log
+                )
+                flasher.flash_solo(
+                    profile,
+                    port,
+                    bundle,
+                    app=app,
+                    migrate_stock=migrate_stock,
+                    manufacturer=manufacturer,
+                    progress=lambda f: self.call_from_thread(self._set_progress, f),
+                    log=self._worker_log,
+                )
+            self.call_from_thread(
+                self._flash_done, "solo", True, f"{profile.product} flashed and rebooted."
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("SOLO flash worker failed")
+            self.call_from_thread(self._flash_done, "solo", False, f"SOLO flash failed: {exc}")
+
+    @work(thread=True, exclusive=True, group=_FLASH_GROUP)
+    def provision_solo_worker(self, port: str, manufacturer: str, profile: BoardProfile) -> None:
+        boot_cmd_id, boot_reply_id = profile.boot_ids
+        try:
+            flasher.provision_node(
+                port,
+                manufacturer,
+                profile.product,
+                boot_cmd_id=boot_cmd_id,
+                boot_reply_id=boot_reply_id,
+                progress=lambda f: self.call_from_thread(self._set_progress, f),
+                log=self._worker_log,
+                # A SOLO product rewrites the whole cancfg sector, so keep its board profile.
+                profile=SOLO_PROFILES.get(profile.product),
+            )
+            self.call_from_thread(
+                self._flash_done, "solo", True, f"cancfg provisioned for {profile.product}."
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("SOLO provision worker failed")
+            self.call_from_thread(
+                self._flash_done, "solo", False, f"Node provisioning failed: {exc}"
+            )
+
+    @work(thread=True, exclusive=True, group=_FLASH_GROUP)
+    def read_solo_config_worker(self, port: str) -> None:
+        try:
+            config = flasher.read_node_config(port, log=self._worker_log)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("SOLO config read worker failed")
+            self.call_from_thread(
+                self._flash_done, "solo", False, f"Node config read failed: {exc}"
+            )
+            return
+        self.call_from_thread(self._solo_config_read, config)
+
+    def _worker_log(self, message: str) -> None:
+        """Log callback for flasher calls in workers; flasher text is plain, never markup."""
+        self.call_from_thread(self._write_log, escape(message))
 
     # ----- UI updates (main thread) -----------------------------------------
 
@@ -900,7 +1193,7 @@ class FlasherApp(App[None]):
         line = Text()
         for index, (level, text) in enumerate(self._status.values()):
             if index:
-                line.append("   │   ", style="dim")
+                line.append("  │  ", style="dim")
             line.append(f"{_STATUS_SYMBOLS[level]} {text}", style=_STATUS_STYLES[level])
         self._main.query_one("#status_bar", Static).update(line)
 
@@ -916,20 +1209,19 @@ class FlasherApp(App[None]):
         busy = self._flash_running()
         self._main.query_one("#flash_target", Button).disabled = busy or not result.flashable
         self._main.query_one("#flash_app", Button).disabled = busy or not result.flashable
-        self._write_log(result.detail)
+        self._write_log(escape(result.detail))
 
     def _refresh_serial_status(self) -> None:
         serial = flasher.find_probe_serial()
+        self._main.query_one("#solo_port_hint", Static).update(
+            Text(f"not {serial.device}: that is the ESP-Prog-2") if serial else ""
+        )
         if serial is None:
             self._set_status("serial", "warn", "Serial: no ESP-Prog-2 port")
         elif serial.in_download_mode:
-            self._set_status(
-                "serial", "ok", f"Serial: {serial.device} (download mode, pid 0x{serial.pid:04X})"
-            )
+            self._set_status("serial", "ok", f"Serial: {serial.device} (download mode)")
         else:
-            self._set_status(
-                "serial", "warn", f"Serial: {serial.device} (bridge running — BOOT+RESET to flash)"
-            )
+            self._set_status("serial", "warn", f"Serial: {serial.device} (bridge running)")
 
     def _refresh_fw_status(self) -> None:
         fw = flasher.find_probe_firmware()
@@ -957,15 +1249,30 @@ class FlasherApp(App[None]):
         self._busy(False)
         if ok:
             self._set_progress(100)
-            self._write_log(f"[green]{message}[/green]")
+            self._write_log(f"[green]{escape(message)}[/green]")
         else:
-            self._write_log(f"[red]{message}[/red]")
+            self._write_log(f"[red]{escape(message)}[/red]")
         self._set_result(tab, ok, message)
+
+    def _solo_config_read(self, config: DfuConfig | None) -> None:
+        self._busy(False)
+        if config is None:
+            message = (
+                "Node config: unprovisioned/invalid (node uses defaults "
+                f"0x{DEFAULT_BOOT_CMD_ID:03X}/0x{DEFAULT_BOOT_REPLY_ID:03X})"
+            )
+        else:
+            message = (
+                f"Node config: {config.manufacturer} / {config.product}, "
+                f"host->boot=0x{config.boot_cmd_id:03X} boot->host=0x{config.boot_reply_id:03X}"
+            )
+        self._write_log(escape(message))
+        self._set_result("solo", True, message)
 
     def _download_done(self, ok: bool, message: str) -> None:
         self._busy(False)
         self._refresh_fw_status()
-        self._write_log(f"[{'green' if ok else 'red'}]{message}[/]")
+        self._write_log(f"[{'green' if ok else 'red'}]{escape(message)}[/]")
         self._set_result("probe", ok, message)
 
     def _busy(self, busy: bool) -> None:
@@ -976,6 +1283,9 @@ class FlasherApp(App[None]):
             "flash_psoc6",
             "flash_probe",
             "update_fw",
+            "flash_solo",
+            "provision_solo",
+            "read_solo_config",
         ):
             btn = self._main.query_one(f"#{bid}", Button)
             if bid in ("flash_target", "flash_app"):
