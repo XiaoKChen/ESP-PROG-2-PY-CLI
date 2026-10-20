@@ -119,6 +119,8 @@ uv run esp-prog2-flasher --update-probe-fw   # fetch official JTAG image as esp-
 
 uv run esp-prog2-flasher --provision-node --port COM7 --product "IDU Radar"   # ESP32-S3 CAN node config (see below)
 uv run esp-prog2-flasher --read-node-config --port COM7
+
+uv run esp-prog2-flasher --flash-solo idu --port COM7 --bundle path/to/bundle   # SOLO board (see below)
 ```
 
 `--freq <hz>` overrides the SWD clock for target flashing (default 1 MHz).
@@ -188,6 +190,62 @@ uv run esp-prog2-flasher --read-node-config --port COM7
 - `--read-node-config` prints the manufacturer, product and CAN IDs, or
   `unprovisioned/invalid (node uses defaults 0x79E/0x79F)`.
 
+## SOLO boards (ESP32-S3)
+
+`--flash-solo` sets up a SOLO board in one run, over the **board's own** USB
+port. It writes the Embedded-CAN-Bootloaders "one updater" release bundle
+(`esp32s3-can-updater-<version>.zip`: one bootloader and CAN updater for every
+board, a partition table per flash layout, `manifest.json`) plus the board's
+`cancfg`. `--port` is required and never auto-detected.
+
+`cancfg` (`0x11000`, 4 KB) holds the 80-byte v2 device config block (name and
+CAN ID pair), then at `+0x50` a 24-byte **board-profile record** (TWAI TX/RX
+GPIOs, CAN bitrate, GPIOs to hold LOW at boot), then `0xFF`. Older readers
+only read the first 80 bytes. If the record is missing or invalid, the updater
+falls back to TX 4, RX 5, 250 kbit/s and no holds.
+
+| Board | Preset (`--product`) | Layout | Flash | TWAI TX/RX | Bitrate | Hold LOW | CAN IDs |
+|---|---|---|---|---|---|---|---|
+| `odu` | `SOLO ODU Controller` | `node-4MB` | 4 MB | 4 / 5 | 250k | none | `0x05`/`0x06` |
+| `idu` | `SOLO IDU Controller` | `idu-16MB` | 16 MB | 6 / 7 | 250k | GPIO3 | `0x07`/`0x08` |
+
+```sh
+# Fetch the bundle from the default release (c-cpp-esp32-v1.2.0) with gh, then flash.
+uv run esp-prog2-flasher --flash-solo odu --port COM7
+# Use an unzipped bundle on disk, or another release.
+uv run esp-prog2-flasher --flash-solo idu --port COM8 --bundle path/to/esp32s3-can-updater-1.2.0
+uv run esp-prog2-flasher --flash-solo idu --port COM8 --bundle-tag c-cpp-esp32-vX.Y.Z
+# Also install an app in ota_0; erase a stock Arduino layout's leftovers first.
+uv run esp-prog2-flasher --flash-solo odu --port COM7 --bundle bundle/ --app firmware.bin --migrate-stock
+# Omit the board on a terminal to pick it from a prompt.
+uv run esp-prog2-flasher --flash-solo --port COM7 --bundle bundle/
+```
+
+Flash sequence, each step one esptool run:
+
+1. With `--migrate-stock`: erase `0x10000..0x1FFFF`.
+2. One `write-flash --flash-mode dio --flash-freq 80m --flash-size <layout>`:
+   bootloader at `0x0`, the layout's partition table at `0x8000`, blank
+   otadata at `0xE000`, the CAN updater at the layout's `factory` offset
+   (`0x20000` on node-4MB, `0xFA0000` on idu-16MB), and `cancfg` at `0x11000`.
+3. Read `cancfg` back and fail if any byte differs.
+4. With `--app`: write it at the layout's `ota_0` (`0x80000` on node-4MB,
+   `0x20000` on idu-16MB) plus an otadata image selecting `ota_0`. Without
+   `--app` the board boots the CAN updater.
+
+Every step but the last runs with `--after no-reset`. The last runs with
+`--after watchdog-reset`, because the RTS hard reset does not reboot the chip
+over USB-Serial-JTAG. The manifest (format 1, esp32s3, dio/80m, `cancfg` at
+`0x11000`), the app image and the device names are all checked before esptool
+first runs.
+
+- Preset CAN IDs are fixed: `--boot-cmd-id`/`--boot-reply-id` and `--product`
+  are rejected. `--manufacturer` works as for `--flash`.
+- `--bundle-tag` needs the [GitHub CLI](https://cli.github.com/) (`gh auth
+  login`). A tag that is not published yet fails with a clear "not found"
+  error; pass `--bundle` instead.
+- The TUI has no SOLO panel yet (issue #13).
+
 ## What it does
 
 1. **Auto-detect the ESP-Prog-2** — enumerates CMSIS-DAP probes and picks the one
@@ -221,6 +279,7 @@ ESP-PROG-2-PY-CLI/
 ├── src/esp_prog2_flasher/
 │   ├── flasher.py     # pyOCD (target) + esptool (probe) logic — no UI deps
 │   ├── dfu_config.py  # encode the device config block (DFU names + boot CAN IDs)
+│   ├── board_profile.py  # ESP32-S3 board-profile record, cancfg image, SOLO presets
 │   ├── app.py         # Textual TUI
 │   ├── cli.py         # argparse entry point (TUI by default)
 │   └── __main__.py    # `python -m esp_prog2_flasher`

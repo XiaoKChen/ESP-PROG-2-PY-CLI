@@ -3,17 +3,21 @@
 Parses arguments with argparse and drives flasher.py for the RA4M1 bootloader, application
 and DFU config block, the PSoC 6 image, the ESP-Prog-2's own firmware, and the DFU config
 block of an ESP32-S3 CAN node (--provision-node / --read-node-config, over the node's own
+port), and a SOLO board's CAN bootloader bundle plus cancfg (--flash-solo, over the board's own
 port). With no flags it launches the TUI in app.py.
 
 Owns:        the flag set and the interactive/headless DFU-config resolution (names plus boot
-             CAN ID pair); the hidden ESPTOOL_SHIM_FLAG dispatch that lets a frozen build
-             re-exec itself as esptool.
-Not here:    the flashing engine (flasher.py), the TUI (app.py), config-block encoding/decoding
-             and the device/CAN-ID table (dfu_config.py).
-Invariants:  the node flags never auto-detect a port — auto-detect finds the ESP-Prog-2, not
-             the node — so --port is mandatory for them.
-Errors:      invalid or conflicting arguments exit with code 2; a failed flash, download or
-             node read logs the exception, prints to stderr and exits with code 1; --detect
+             CAN ID pair); the --flash-solo board keys (SOLO_BOARDS) and board prompt; the
+             hidden ESPTOOL_SHIM_FLAG dispatch that lets a frozen build re-exec itself as esptool.
+Not here:    the flashing engine and the SOLO bundle (flasher.py), the TUI (app.py),
+             config-block encoding/decoding and the device/CAN-ID table (dfu_config.py), the
+             SOLO presets (board_profile.py).
+Invariants:  the node flags and --flash-solo never auto-detect a port — auto-detect finds the
+             ESP-Prog-2, not the board — so --port is mandatory for them. A SOLO preset's CAN
+             ID pair is fixed, so --boot-cmd-id/--boot-reply-id and --product are rejected
+             with --flash-solo.
+Errors:      invalid or conflicting arguments exit with code 2; a failed flash, download, bundle
+             fetch or node read logs the exception, prints to stderr and exits with code 1; --detect
              exits 2 only when no probe is found, otherwise 0; --read-node-config exits 0 for
              both a provisioned and an unprovisioned node.
 Depends on:  flasher.py, dfu_config.py, and app.py (imported lazily, only for the TUI).
@@ -25,9 +29,12 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import tempfile
 from pathlib import Path
+from typing import Final
 
 from . import flasher
+from .board_profile import SOLO_PROFILES
 from .dfu_config import (
     DEFAULT_BOOT_CMD_ID,
     DEFAULT_BOOT_REPLY_ID,
@@ -40,6 +47,12 @@ from .dfu_config import (
 from .flasher import TargetState
 
 logger = logging.getLogger(__name__)
+
+# --flash-solo board keys, each naming a SOLO_PROFILES preset.
+SOLO_BOARDS: Final[dict[str, str]] = {"odu": "SOLO ODU Controller", "idu": "SOLO IDU Controller"}
+# What --flash-solo holds when given without a board: prompt for one. Not a str, so
+# argparse neither type-converts nor choice-checks it.
+_ASK_FOR_BOARD: Final = object()
 
 
 def _can_id(text: str) -> int:
@@ -140,10 +153,52 @@ def _build_parser() -> argparse.ArgumentParser:
         "partition, then exit. Requires --port (the node's port).",
     )
     p.add_argument(
+        "--flash-solo",
+        nargs="?",
+        choices=tuple(SOLO_BOARDS),
+        const=_ASK_FOR_BOARD,
+        default=None,
+        help="Flash a SOLO board (ESP32-S3) over its own USB port: the Embedded-CAN-Bootloaders "
+        "bundle (bootloader, partition table, otadata, CAN updater) plus the board's cancfg "
+        "(DFU config + board profile), verified by read-back, then a watchdog reset. odu = "
+        f"{SOLO_BOARDS['odu']!r}, idu = {SOLO_BOARDS['idu']!r}; omit the board to pick it "
+        "interactively. Requires --port.",
+    )
+    p.add_argument(
+        "--bundle",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="With --flash-solo: an unzipped esp32s3-can-updater bundle directory (holding "
+        "manifest.json). Default: fetch --bundle-tag.",
+    )
+    p.add_argument(
+        "--bundle-tag",
+        default=None,
+        metavar="TAG",
+        help="With --flash-solo: the Embedded-CAN-Bootloaders release to fetch the bundle from "
+        f"with the GitHub CLI (default: {flasher.DEFAULT_SOLO_BUNDLE_TAG}).",
+    )
+    p.add_argument(
+        "--app",
+        type=Path,
+        default=None,
+        metavar="BIN",
+        help="With --flash-solo: also write this app image to ota_0 and select it in otadata. "
+        "Without it the board boots the CAN updater.",
+    )
+    p.add_argument(
+        "--migrate-stock",
+        action="store_true",
+        help="With --flash-solo: first erase 0x10000..0x1FFFF, left over from a stock "
+        "Arduino-ESP32 layout.",
+    )
+    p.add_argument(
         "--port",
         default=None,
-        help="Serial port for --flash-probe (default: auto-detect), or the CAN node's port "
-        "for --provision-node/--read-node-config (required there, never auto-detected).",
+        help="Serial port for --flash-probe (default: auto-detect), or the board's port for "
+        "--provision-node/--read-node-config/--flash-solo (required there, never "
+        "auto-detected).",
     )
     p.add_argument(
         "--manufacturer",
@@ -219,11 +274,73 @@ def _provision_node(args: argparse.Namespace) -> None:
             product,
             boot_cmd_id=boot_cmd_id,
             boot_reply_id=boot_reply_id,
+            # A SOLO product rewrites the whole cancfg sector, so keep its board profile.
+            profile=SOLO_PROFILES.get(product),
             log=print,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Node provisioning failed")
         print(f"Node provisioning failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _prompt_solo_board() -> str:
+    """Ask which SOLO preset to flash; exits 2 when stdin is not a terminal."""
+    if not sys.stdin.isatty():
+        print(
+            f"--flash-solo needs a board ({' or '.join(SOLO_BOARDS)}) when not run interactively.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    boards = tuple(SOLO_BOARDS)
+    print("SOLO board:")
+    for i, board in enumerate(boards, 1):
+        print(f"    {i}) {SOLO_BOARDS[board]}")
+    try:
+        choice = input(f"  Select 1-{len(boards)}: ").strip()
+    except EOFError:  # Windows reports NUL as a terminal, so isatty() alone is not enough.
+        choice = ""
+    if not choice.isdigit() or not 1 <= int(choice) <= len(boards):
+        print(f"Invalid selection: {choice!r}", file=sys.stderr)
+        sys.exit(2)
+    return boards[int(choice) - 1]
+
+
+def _flash_solo(args: argparse.Namespace) -> None:
+    """Handle --flash-solo: resolve the preset and bundle, then flash the board."""
+    board = _prompt_solo_board() if args.flash_solo is _ASK_FOR_BOARD else args.flash_solo
+    product = SOLO_BOARDS[board]
+    if args.product is not None:
+        print(
+            f"--product is not allowed with --flash-solo; the {board} preset is {product!r}.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if args.bundle is not None and args.bundle_tag is not None:
+        print("Give --bundle or --bundle-tag, not both.", file=sys.stderr)
+        sys.exit(2)
+    # A preset is a KNOWN device, so this rejects any --boot-cmd-id/--boot-reply-id.
+    manufacturer, _, _, _ = _resolve_dfu_config(
+        args.manufacturer, product, args.boot_cmd_id, args.boot_reply_id
+    )
+    assert manufacturer is not None
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle_dir = args.bundle or flasher.fetch_solo_bundle(
+                args.bundle_tag or flasher.DEFAULT_SOLO_BUNDLE_TAG, Path(tmp), log=print
+            )
+            flasher.flash_solo(
+                SOLO_PROFILES[product],
+                args.port,
+                bundle_dir,
+                app=args.app,
+                migrate_stock=args.migrate_stock,
+                manufacturer=manufacturer,
+                log=print,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("SOLO flash failed")
+        print(f"SOLO flash failed: {exc}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -438,15 +555,18 @@ def main() -> None:
             sys.exit(1)
         return
 
-    if args.provision_node or args.read_node_config:
+    if args.provision_node or args.read_node_config or args.flash_solo is not None:
         if not args.port:
             print(
-                "--provision-node/--read-node-config require --port (the node's serial port); "
-                "it is not auto-detected because auto-detect finds the ESP-Prog-2, not the node.",
+                "--provision-node/--read-node-config/--flash-solo require --port (the board's "
+                "serial port); it is not auto-detected because auto-detect finds the ESP-Prog-2, "
+                "not the board.",
                 file=sys.stderr,
             )
             sys.exit(2)
-        if args.provision_node:
+        if args.flash_solo is not None:
+            _flash_solo(args)
+        elif args.provision_node:
             _provision_node(args)
         else:
             _read_node_config(args.port)
