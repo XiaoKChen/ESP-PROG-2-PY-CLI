@@ -13,7 +13,8 @@ Not here:    USB/serial/SWD access and all flashing logic (flasher.py), config-b
              never touches hardware directly.
 Invariants:  a bare printable key never fires while an Input has focus (the Input consumes
              it); only ctrl/function-key bindings are priority bindings, and none of them
-             runs while a modal screen is open. Flash target and Flash app stay disabled
+             runs while a modal screen is open. No flash, erase or provision write starts
+             before ConfirmScreen returns True. Flash target and Flash app stay disabled
              until a Detect finds a flashable RA4M1.
 Concurrency: flasher calls run in Textual thread workers (@work(thread=True)); results and
              progress reach the UI only via call_from_thread. Every write and serial read
@@ -56,6 +57,7 @@ from textual.widgets import (
 
 from . import __version__, flasher
 from .dfu_config import (
+    CONFIG_ADDRESS,
     DEFAULT_BOOT_CMD_ID,
     DEFAULT_BOOT_REPLY_ID,
     DEFAULT_MANUFACTURER,
@@ -64,7 +66,7 @@ from .dfu_config import (
     MAX_CAN_ID,
 )
 from .flasher import DetectResult, TargetState
-from .tui.screens import ConfirmScreen, FilePickerScreen, HelpRow, HelpScreen
+from .tui.screens import ConfirmScreen, FilePickerScreen, HelpRow, HelpScreen, SummaryRow
 
 logger = logging.getLogger(__name__)
 
@@ -125,10 +127,13 @@ _TABS_GROUP: Final = Binding.Group("Tabs", compact=True)
 # with focus swallows them; ctrl/function keys are priority bindings so they also work
 # while typing (check_action keeps them from firing under a modal screen).
 GLOBAL_BINDINGS: Final[tuple[Binding, ...]] = (
-    *(Binding(tab.key, f"switch_tab('{tab.id}')", tab.label, group=_TABS_GROUP) for tab in TABS),
+    *(
+        Binding(tab.key, f"switch_tab('{tab.id}')", f"Tab: {tab.label}", group=_TABS_GROUP)
+        for tab in TABS
+    ),
     Binding("question_mark,f1", "help", "Help", key_display="?"),
     Binding("ctrl+d", "detect", "Detect", priority=True),
-    Binding("ctrl+l", "toggle_log", "Log", show=False, priority=True),
+    Binding("ctrl+l", "toggle_log", "Expand/restore log", show=False, priority=True),
     Binding("escape", "leave_input", "Leave input", show=False),
     Binding("q", "quit", "Quit", show=False),
     Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
@@ -173,6 +178,13 @@ def _parse_can_id(text: str) -> int:
     if not 0 <= value <= MAX_CAN_ID:
         raise ValueError(f"CAN ID must be 0x000..0x{MAX_CAN_ID:03X}")
     return value
+
+
+def _can_ids_text(boot_cmd_id: int | None, boot_reply_id: int | None) -> str:
+    """Describe the boot CAN ID pair a config write carries, defaults included."""
+    if boot_cmd_id is None or boot_reply_id is None:
+        return f"bootloader defaults 0x{DEFAULT_BOOT_CMD_ID:03X} / 0x{DEFAULT_BOOT_REPLY_ID:03X}"
+    return f"host->boot 0x{boot_cmd_id:03X}  ·  boot->host 0x{boot_reply_id:03X}"
 
 
 def _picker_start(current: str) -> Path:
@@ -511,6 +523,19 @@ class FlasherApp(App[None]):
             return False
         return True
 
+    def _confirm_then(
+        self, title: str, rows: list[SummaryRow], start: Callable[[], None], verb: str = "Flash"
+    ) -> None:
+        """Show what a write will do; call ``start`` only after the user confirms it."""
+
+        def on_result(confirmed: bool | None) -> None:
+            if confirmed:
+                start()
+            else:
+                self._write_log(f"[yellow]{title} cancelled.[/yellow]")
+
+        self.push_screen(ConfirmScreen(title, rows, verb), on_result)
+
     def action_flash_target(self) -> None:
         if not self._ready_to_start():
             return
@@ -566,19 +591,37 @@ class FlasherApp(App[None]):
                 self._write_log(f"[red]Invalid boot CAN ID:[/red] {exc}")
                 return
 
-        self._busy(True)
-        self._set_progress(0)
-        self._write_log(f"[b]Flashing target[/b] {hex_path.name} …")
-        if manufacturer and product:
-            self._write_log(
-                f"USB names: manufacturer=[b]{manufacturer}[/b] product=[b]{product}[/b]"
-            )
-        if boot_cmd_id is not None and boot_reply_id is not None:
-            self._write_log(
-                f"Boot CAN IDs: host->boot=[b]0x{boot_cmd_id:03X}[/b] "
-                f"boot->host=[b]0x{boot_reply_id:03X}[/b]"
-            )
-        self.flash_target_worker(hex_path, manufacturer, product, boot_cmd_id, boot_reply_id)
+        rows: list[SummaryRow] = [
+            ("Chip", f"RA4M1 ({flasher.TARGET_TYPE}) over SWD"),
+            ("Image", str(hex_path)),
+            ("Address", "as given by the .hex records (bootloader region)"),
+        ]
+        if product is None:
+            rows.append(("Config", "none — the bootloader keeps its compiled-in names"))
+        else:
+            rows += [
+                ("Config", f"DFU config block @ 0x{CONFIG_ADDRESS:08X} (data flash)"),
+                ("Manufacturer", mfr),
+                ("Product", product),
+                ("CAN IDs", _can_ids_text(boot_cmd_id, boot_reply_id)),
+            ]
+
+        def start() -> None:
+            self._busy(True)
+            self._set_progress(0)
+            self._write_log(f"[b]Flashing target[/b] {hex_path.name} …")
+            if manufacturer and product:
+                self._write_log(
+                    f"USB names: manufacturer=[b]{manufacturer}[/b] product=[b]{product}[/b]"
+                )
+            if boot_cmd_id is not None and boot_reply_id is not None:
+                self._write_log(
+                    f"Boot CAN IDs: host->boot=[b]0x{boot_cmd_id:03X}[/b] "
+                    f"boot->host=[b]0x{boot_reply_id:03X}[/b]"
+                )
+            self.flash_target_worker(hex_path, manufacturer, product, boot_cmd_id, boot_reply_id)
+
+        self._confirm_then("Flash the RA4M1 bootloader", rows, start)
 
     def action_flash_probe(self) -> None:
         if not self._ready_to_start():
@@ -599,10 +642,21 @@ class FlasherApp(App[None]):
                 f"[yellow]{serial.device} looks like the running bridge (not download "
                 f"mode). If flashing fails, hold BOOT + tap RESET, then retry.[/yellow]"
             )
-        self._busy(True)
-        self._set_progress(0)
-        self._write_log(f"[b]Flashing ESP-Prog-2[/b] {fw.name} via {serial.device} …")
-        self.flash_probe_worker(fw, serial.device)
+        mode = "download mode" if serial.in_download_mode else "bridge running"
+        rows: list[SummaryRow] = [
+            ("Chip", f"ESP-Prog-2 ({flasher.PROBE_CHIP}) via esptool"),
+            ("Port", f"{serial.device} ({mode})"),
+            ("Image", str(fw)),
+            ("Address", f"{flasher.PROBE_FLASH_OFFSET} (merged bootloader + partitions + app)"),
+        ]
+
+        def start() -> None:
+            self._busy(True)
+            self._set_progress(0)
+            self._write_log(f"[b]Flashing ESP-Prog-2[/b] {fw.name} via {serial.device} …")
+            self.flash_probe_worker(fw, serial.device)
+
+        self._confirm_then("Flash the ESP-Prog-2 firmware", rows, start)
 
     def action_update_fw(self) -> None:
         if not self._ready_to_start():
@@ -630,10 +684,21 @@ class FlasherApp(App[None]):
             else flasher.APP_BASE_ADDRESS
         )
 
-        self._busy(True)
-        self._set_progress(0)
-        self._write_log(f"[b]Flashing application[/b] {bin_path.name} …")
-        self.flash_app_worker(bin_path, base_address)
+        size = bin_path.stat().st_size
+        rows: list[SummaryRow] = [
+            ("Chip", f"RA4M1 ({flasher.TARGET_TYPE}) over SWD"),
+            ("Image", str(bin_path)),
+            ("Address", f"0x{base_address:X}–0x{base_address + size - 1:X} ({size} bytes)"),
+            ("Erase", f"those sectors only; the bootloader below 0x{base_address:X} is kept"),
+        ]
+
+        def start() -> None:
+            self._busy(True)
+            self._set_progress(0)
+            self._write_log(f"[b]Flashing application[/b] {bin_path.name} …")
+            self.flash_app_worker(bin_path, base_address)
+
+        self._confirm_then("Flash the RA4M1 application", rows, start)
 
     def action_toggle_embassy(self) -> None:
         self._main.query_one("#embassy_checkbox", Checkbox).toggle()
@@ -645,10 +710,24 @@ class FlasherApp(App[None]):
         if not hex_path.is_file():
             self._write_log(f"[red]PSoC 6 hex not found:[/red] {hex_path}")
             return
-        self._busy(True)
-        self._set_progress(0)
-        self._write_log(f"[b]Flashing PSoC 6[/b] {hex_path.name} …")
-        self.flash_psoc6_worker(hex_path)
+        rows: list[SummaryRow] = [
+            ("Chip", f"PSoC 6 ({flasher.PSOC6_TARGET_TYPE}) over SWD"),
+            ("Image", str(hex_path)),
+            (
+                "Address",
+                f"main flash 0x{flasher.PSOC6_FLASH_START:08X}–"
+                f"0x{flasher.PSOC6_FLASH_END - 1:08X} only",
+            ),
+            ("Skipped", "Cypress metadata is dropped; SFLASH/eFuse data aborts the flash"),
+        ]
+
+        def start() -> None:
+            self._busy(True)
+            self._set_progress(0)
+            self._write_log(f"[b]Flashing PSoC 6[/b] {hex_path.name} …")
+            self.flash_psoc6_worker(hex_path)
+
+        self._confirm_then("Flash the PSoC 6", rows, start)
 
     def _browse(self, input_id: str, suffix: str, title: str, select_dirs: bool = False) -> None:
         field = self._main.query_one(f"#{input_id}", Input)

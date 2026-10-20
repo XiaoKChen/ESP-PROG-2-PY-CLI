@@ -232,6 +232,7 @@ class HelpScreen(ModalScreen[None]):
         padding: 0 1;
     }
     #help_body { height: auto; max-height: 100%; }
+    .help-title { margin: 1 0 0 0; }
     """
 
     def __init__(self, sections: Sequence[HelpSection]) -> None:
@@ -247,11 +248,11 @@ class HelpScreen(ModalScreen[None]):
         with Vertical(id="help_dialog"), VerticalScroll(id="help_body"):
             for title, rows in self._sections:
                 table = Table.grid(padding=(0, 2))
-                table.add_column(style="bold", no_wrap=True, min_width=12)
+                table.add_column(style="bold", no_wrap=True, min_width=16)
                 table.add_column()
                 for key, description in rows:
                     table.add_row(key, description)
-                yield Static(Text(title, style="bold underline"))
+                yield Static(Text(title, style="bold underline"), classes="help-title")
                 yield Static(table)
 
     def on_mount(self) -> None:
