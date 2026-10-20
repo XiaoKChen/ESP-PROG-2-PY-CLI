@@ -213,7 +213,7 @@ class DashboardScreen(ChromeScreen[None]):
     DEFAULT_CSS = """
     DashboardScreen {
         & #targets { width: 1fr; }
-        & #details { width: 50%; }
+        & #details { width: 45%; }
         &.-narrow #details { display: none; }
     }
     """

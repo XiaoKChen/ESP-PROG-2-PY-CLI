@@ -352,7 +352,7 @@ class FilterList(Widget):
         rest = max(room - trail - 2 * len(_COLUMN_GAP), 2)
         trail_label = max((cell_len(self._label_text(r)) for r in trail_rows), default=0)
         trail_label = min(trail_label, rest // 2)
-        return _Columns(min(label, max(room * 3 // 5, 8)), trail_label, rest - trail_label)
+        return _Columns(min(label, max(room * 2 // 3, 8)), trail_label, rest - trail_label)
 
     @staticmethod
     def _label_text(row: ListRow) -> str:
