@@ -2,22 +2,40 @@
 
 Wraps pyOCD to detect the ESP-Prog-2 CMSIS-DAP probe and to flash the RA4M1 (bootloader
 hex, application .bin, DFU config block) and the PSoC 6 (main-flash hex) over SWD, and wraps
-esptool to reflash the ESP-Prog-2's own ESP32-S3 firmware. It has no Textual dependency, so
-the same logic backs both the TUI and the headless CLI.
+esptool to reflash the ESP-Prog-2's own ESP32-S3 firmware and to provision (write, verify,
+read back) the DFU config block in an ESP32-S3 CAN node's ``cancfg`` partition over the
+node's own serial/USB download port. It also flashes a SOLO board (ESP32-S3) from the
+Embedded-CAN-Bootloaders release bundle: bootloader, partition table, otadata, CAN updater and
+the board's cancfg image, optionally plus an app in ota_0. It has no Textual dependency, so the
+same logic backs both the TUI and the headless CLI.
 
 Owns:        probe VID/PID and target-type names, APP_BASE_ADDRESS, the PSoC 6 flash and
-             metadata address ranges, bundled-asset lookup (hex/, packs/, firmware/), and
-             ESPTOOL_SHIM_FLAG (the frozen-build esptool re-exec flag dispatched by cli.py).
-Not here:    DFU config-block encoding and the device table (dfu_config.py), argument parsing
-             (cli.py), the TUI (app.py).
+             metadata address ranges, bundled-asset lookup (hex/, packs/, firmware/),
+             ESPTOOL_SHIM_FLAG (the frozen-build esptool re-exec flag dispatched by cli.py),
+             and the node's partition-table offset/entry format, the cancfg partition identity
+             and its fallback offset; the SOLO release bundle (repo, default tag, asset pattern,
+             manifest format and its validation), the SOLO flash sequence, and the otadata image
+             that selects ota_0.
+Not here:    DFU config-block encoding/decoding and the device table (dfu_config.py), the
+             board-profile record, cancfg image and SOLO presets (board_profile.py), argument
+             parsing (cli.py), the TUI (app.py).
+Invariants:  a node's config block is only written to the cancfg partition its partition table
+             names; the fixed DEFAULT_CANCFG_OFFSET is used only when no valid table is found.
+             A SOLO flash validates the manifest, the app image and the cancfg image before its
+             first esptool call; every esptool step but the last keeps the chip in download mode
+             (--after no-reset) and the last one ends with --after watchdog-reset, because the
+             RTS hard reset does not reboot an ESP32-S3 over USB-Serial-JTAG.
 Concurrency: calls block until hardware I/O finishes; progress and log callbacks fire on the
              calling thread, so the TUI runs these functions in worker threads.
-Errors:      FlasherError hierarchy (ProbeNotFoundError, FlashFailedError); FileNotFoundError
-             for a missing image; InvalidNameError/InvalidCanIdError from dfu_config are
-             raised before any hardware is touched.
-Depends on:  dfu_config.py; pyocd, esptool, pyserial, intelhex and truststore, all imported
-             lazily so importing this module never blocks on USB.
-See also:    tests/test_psoc6.py, cli.py, app.py
+Errors:      FlasherError hierarchy (ProbeNotFoundError, FlashFailedError, BundleError for a
+             bad, missing or unfetchable SOLO bundle); FileNotFoundError for a missing image;
+             InvalidNameError/InvalidCanIdError from dfu_config and InvalidProfileError from
+             board_profile are raised before any hardware is touched.
+Depends on:  dfu_config.py, board_profile.py; pyocd, esptool, pyserial, intelhex and
+             truststore, all imported lazily so importing this module never blocks on USB; the
+             GitHub CLI (gh) on PATH, only for fetch_solo_bundle.
+See also:    tests/test_psoc6.py, tests/test_dfu_config.py, tests/test_flasher.py, cli.py,
+             app.py
 
 The proven, equivalent pyOCD command-line path for the RA4M1 is:
 
@@ -30,22 +48,32 @@ flashing the RA4M1 must go through pyOCD, not OpenOCD.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import re
+import struct
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
+import zipfile
+import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
+
+from .dfu_config import DEFAULT_MANUFACTURER
 
 if TYPE_CHECKING:
     from intelhex import IntelHex
     from pyocd.core.session import Session
     from pyocd.probe.debug_probe import DebugProbe
+
+    from .board_profile import BoardProfile
+    from .dfu_config import DfuConfig
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +123,30 @@ PSOC6_FLASH_END: Final[int] = 0x10080000
 PSOC6_METADATA_START: Final[int] = 0x90000000
 PSOC6_METADATA_END: Final[int] = 0xA0000000
 
+# ESP32-S3 CAN node (node_updater): the DFU config block lives in a raw data
+# partition named "cancfg" with custom subtype 0x40 (node_updater/partitions.csv).
+NODE_CHIP: Final[str] = "esp32s3"
+PARTITION_TABLE_OFFSET: Final[int] = 0x8000  # CONFIG_PARTITION_TABLE_OFFSET
+PARTITION_TABLE_SIZE: Final[int] = 0xC00  # ESP-IDF maximum table length
+# Used only when the node has no valid partition table (e.g. blank flash).
+DEFAULT_CANCFG_OFFSET: Final[int] = 0x11000
+CANCFG_PARTITION_NAME: Final[str] = "cancfg"
+CANCFG_PARTITION_SUBTYPE: Final[int] = 0x40
+PARTITION_TYPE_DATA: Final[int] = 0x01
+# ESP-IDF partition entry: magic, type, subtype, offset, size, name[16], flags.
+_PARTITION_ENTRY_FORMAT: Final[str] = "<2sBBII16sI"
+_PARTITION_ENTRY_SIZE: Final[int] = struct.calcsize(_PARTITION_ENTRY_FORMAT)  # 32
+_PARTITION_ENTRY_MAGIC: Final[bytes] = b"\xaa\x50"  # u16 0x50AA little-endian
+_PARTITION_MD5_MAGIC: Final[bytes] = b"\xeb\xeb"  # optional MD5 entry ends the table
+_PARTITION_END_MAGIC: Final[bytes] = b"\xff\xff"  # erased flash ends the table
+
 ProgressCallback = Callable[[float], None]
 LogCallback = Callable[[str], None]
+# Runs one esptool argv and returns its exit code. Injected so tests can capture the
+# exact command plan without hardware; _run_esptool is the real one.
+EsptoolRunner = Callable[[list[str], ProgressCallback | None, LogCallback | None], int]
+# esptool --after modes: no-reset between steps, watchdog-reset after the last one.
+ResetMode = Literal["no-reset", "watchdog-reset"]
 
 
 class FlasherError(Exception):
@@ -109,6 +159,10 @@ class ProbeNotFoundError(FlasherError):
 
 class FlashFailedError(FlasherError):
     """Raised when programming the target or the probe's own firmware fails."""
+
+
+class BundleError(FlasherError):
+    """Raised when a SOLO release bundle is missing, cannot be fetched, or fails validation."""
 
 
 def _find_bundled(*parts: str) -> Path | None:
@@ -704,18 +758,37 @@ def flash_probe(
     if not bin_path.is_file():
         raise FileNotFoundError(f"Firmware file not found: {bin_path}")
 
-    if getattr(sys, "frozen", False):
-        # No "esptool" script on PATH and sys.executable is this bundle itself —
-        # re-exec it with a hidden flag that cli.py dispatches to esptool.main().
-        args = [sys.executable, ESPTOOL_SHIM_FLAG, "--chip", PROBE_CHIP]
-    else:
-        args = [sys.executable, "-m", "esptool", "--chip", PROBE_CHIP]
+    args = _esptool_command(PROBE_CHIP)
     if port:
         args += ["--port", port]
     args += ["--baud", str(baud), "write-flash", PROBE_FLASH_OFFSET, str(bin_path)]
 
     if log:
         log("esptool " + " ".join(args[3:]))
+    returncode = _run_esptool(args, progress, log)
+    if returncode != 0:
+        raise FlashFailedError(
+            f"esptool exited with code {returncode}. "
+            "Is the ESP-Prog-2 in download mode (hold BOOT, tap RESET)?"
+        )
+
+
+def _esptool_command(chip: str) -> list[str]:
+    """Return the argv prefix that runs esptool for ``chip``, from source or a frozen build."""
+    if getattr(sys, "frozen", False):
+        # No "esptool" script on PATH and sys.executable is this bundle itself —
+        # re-exec it with a hidden flag that cli.py dispatches to esptool.main().
+        return [sys.executable, ESPTOOL_SHIM_FLAG, "--chip", chip]
+    return [sys.executable, "-m", "esptool", "--chip", chip]
+
+
+def _run_esptool(
+    args: list[str], progress: ProgressCallback | None, log: LogCallback | None
+) -> int:
+    """Run esptool, streaming its output to ``log`` and its percentages to ``progress``.
+
+    Returns esptool's exit code; callers turn a non-zero code into their own error.
+    """
     percent = re.compile(r"\((\d+)\s*%\)")
     proc = subprocess.Popen(
         args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
@@ -729,8 +802,639 @@ def flash_probe(
         if match and progress:
             with contextlib.suppress(ValueError):
                 progress(float(match.group(1)))
-    if proc.wait() != 0:
-        raise FlashFailedError(
-            f"esptool exited with code {proc.returncode}. "
-            "Is the ESP-Prog-2 in download mode (hold BOOT, tap RESET)?"
+    return proc.wait()
+
+
+# ---------------------------------------------------------------------------
+# ESP32-S3 CAN node — DFU config block in the node's `cancfg` data partition,
+# written over the NODE's own serial/USB download port (not the ESP-Prog-2's).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class PartitionEntry:
+    """One entry of an ESP-IDF partition table."""
+
+    name: str
+    partition_type: int
+    subtype: int
+    offset: int
+    size: int
+
+
+def parse_partition_table(table: bytes) -> list[PartitionEntry]:
+    """Decode a raw ESP-IDF partition table, or return ``[]`` if ``table`` holds none.
+
+    Entries are read until the erased-flash (0xFFFF) or MD5 (0xEBEB) marker. An
+    entry with any other unknown magic means this is not a partition table (blank
+    or foreign flash), so nothing is returned rather than an untrustworthy prefix.
+    """
+    entries: list[PartitionEntry] = []
+    for start in range(0, len(table) - _PARTITION_ENTRY_SIZE + 1, _PARTITION_ENTRY_SIZE):
+        magic, partition_type, subtype, offset, size, raw_name, _flags = struct.unpack_from(
+            _PARTITION_ENTRY_FORMAT, table, start
         )
+        if magic in (_PARTITION_END_MAGIC, _PARTITION_MD5_MAGIC):
+            break
+        if magic != _PARTITION_ENTRY_MAGIC:
+            return []
+        name = raw_name.split(b"\x00", 1)[0].decode("ascii", "replace")
+        entries.append(PartitionEntry(name, partition_type, subtype, offset, size))
+    return entries
+
+
+def cancfg_offset_from_table(table: bytes) -> int | None:
+    """Return the ``cancfg`` partition offset named by a raw partition table.
+
+    Returns ``None`` when ``table`` holds no valid partition table (e.g. blank
+    flash) so the caller can fall back to ``DEFAULT_CANCFG_OFFSET``.
+
+    Raises:
+        FlasherError: if the table is valid but has no cancfg data partition —
+            the node firmware would never read a block written anywhere else.
+    """
+    entries = parse_partition_table(table)
+    if not entries:
+        return None
+    for entry in entries:
+        if (
+            entry.partition_type == PARTITION_TYPE_DATA
+            and entry.subtype == CANCFG_PARTITION_SUBTYPE
+            and entry.name == CANCFG_PARTITION_NAME
+        ):
+            return entry.offset
+    raise FlasherError(
+        f"The node's partition table has no {CANCFG_PARTITION_NAME!r} data partition "
+        f"(subtype 0x{CANCFG_PARTITION_SUBTYPE:02X}); is this a CAN node running node_updater?"
+    )
+
+
+def _run_node_esptool(
+    port: str,
+    baud: int,
+    command: list[str],
+    log: LogCallback | None,
+    progress: ProgressCallback | None = None,
+    runner: EsptoolRunner = _run_esptool,
+    after: ResetMode | None = None,
+) -> None:
+    reset_args = ["--after", after] if after is not None else []
+    esptool_args = ["--port", port, "--baud", str(baud), *reset_args, *command]
+    if log:
+        log(f"esptool --chip {NODE_CHIP} " + " ".join(esptool_args))
+    returncode = runner(_esptool_command(NODE_CHIP) + esptool_args, progress, log)
+    if returncode != 0:
+        raise FlashFailedError(
+            f"esptool exited with code {returncode}. Is the node's ESP32-S3 connected on "
+            f"{port} and able to enter download mode?"
+        )
+
+
+def _read_node_flash(
+    port: str,
+    baud: int,
+    offset: int,
+    size: int,
+    log: LogCallback | None,
+    runner: EsptoolRunner = _run_esptool,
+    after: ResetMode | None = None,
+) -> bytes:
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = Path(tmp) / "read.bin"
+        _run_node_esptool(
+            port,
+            baud,
+            ["read-flash", f"0x{offset:X}", str(size), str(out_path)],
+            log,
+            runner=runner,
+            after=after,
+        )
+        return out_path.read_bytes()
+
+
+def _node_cancfg_offset(
+    port: str, baud: int, log: LogCallback | None, runner: EsptoolRunner = _run_esptool
+) -> int:
+    table = _read_node_flash(port, baud, PARTITION_TABLE_OFFSET, PARTITION_TABLE_SIZE, log, runner)
+    offset = cancfg_offset_from_table(table)
+    if offset is None:
+        offset = DEFAULT_CANCFG_OFFSET
+        logger.info("No partition table at 0x%X; using 0x%X", PARTITION_TABLE_OFFSET, offset)
+        if log:
+            log(
+                f"No valid partition table at 0x{PARTITION_TABLE_OFFSET:X}; "
+                f"using the default cancfg offset 0x{offset:X}"
+            )
+    elif log:
+        log(f"Found {CANCFG_PARTITION_NAME} partition @ 0x{offset:X}")
+    return offset
+
+
+def provision_node(
+    port: str,
+    manufacturer: str,
+    product: str,
+    boot_cmd_id: int | None = None,
+    boot_reply_id: int | None = None,
+    baud: int = DEFAULT_BAUD_RATE,
+    progress: ProgressCallback | None = None,
+    log: LogCallback | None = None,
+    profile: BoardProfile | None = None,
+    runner: EsptoolRunner = _run_esptool,
+) -> None:
+    """Write the DFU config block to an ESP32-S3 CAN node's cancfg partition and verify it.
+
+    The offset comes from the node's partition table (``DEFAULT_CANCFG_OFFSET`` if
+    it has none). With a ``profile``, its board-profile record follows the block as
+    the full 4 KB cancfg image (board_profile.build_cancfg_image); the block's names
+    and IDs still come from the arguments. After writing, everything written is read
+    back and compared byte-for-byte.
+
+    Raises:
+        InvalidNameError, InvalidCanIdError, InvalidProfileError: bad names/IDs or a
+            bad profile record, before any hardware I/O.
+        FlasherError: a valid partition table without a cancfg partition.
+        FlashFailedError: esptool failed, or the read-back differs from the block.
+    """
+    from .board_profile import build_cancfg_image
+    from .dfu_config import build_config_block
+
+    # Fail fast on bad names/IDs before touching hardware.
+    block = build_config_block(manufacturer, product, boot_cmd_id, boot_reply_id)
+    if profile is not None:
+        block = build_cancfg_image(block, profile.record)
+    offset = _node_cancfg_offset(port, baud, log, runner)
+
+    if log:
+        log(f"Writing DFU config block ({len(block)} bytes) @ 0x{offset:X}")
+    with tempfile.TemporaryDirectory() as tmp:
+        block_path = Path(tmp) / "cancfg.bin"
+        block_path.write_bytes(block)
+        _run_node_esptool(
+            port,
+            baud,
+            ["write-flash", f"0x{offset:X}", str(block_path)],
+            log,
+            progress,
+            runner,
+        )
+
+    readback = _read_node_flash(port, baud, offset, len(block), log, runner)
+    if readback != block:
+        raise FlashFailedError(
+            f"Node config read-back mismatch at 0x{offset:X}: "
+            f"wrote {block.hex()}, read {readback.hex()}"
+        )
+    if log:
+        log("Node config verified.")
+
+
+def read_node_config(
+    port: str, baud: int = DEFAULT_BAUD_RATE, log: LogCallback | None = None
+) -> DfuConfig | None:
+    """Read and decode the DFU config block from an ESP32-S3 CAN node's cancfg partition.
+
+    Returns ``None`` when the block is unprovisioned or invalid — the node then
+    uses its defaults (0x79E/0x79F, empty name).
+
+    Raises:
+        FlasherError: a valid partition table without a cancfg partition.
+        FlashFailedError: esptool failed.
+    """
+    from .dfu_config import BLOCK_SIZE, parse_config_block
+
+    offset = _node_cancfg_offset(port, baud, log)
+    return parse_config_block(_read_node_flash(port, baud, offset, BLOCK_SIZE, log))
+
+
+# ---------------------------------------------------------------------------
+# SOLO boards (ESP32-S3) — the Embedded-CAN-Bootloaders "one updater" release
+# bundle plus a per-board cancfg image, written over the board's own USB port.
+# ---------------------------------------------------------------------------
+
+SOLO_BUNDLE_REPO: Final[str] = "XiaoKChen/Embedded-CAN-Bootloaders"
+DEFAULT_SOLO_BUNDLE_TAG: Final[str] = "c-cpp-esp32-v1.2.0"
+SOLO_BUNDLE_ASSET_PATTERN: Final[str] = "esp32s3-can-updater-*.zip"
+SOLO_MANIFEST_NAME: Final[str] = "manifest.json"
+SOLO_MANIFEST_FORMAT: Final[int] = 1
+SOLO_FLASH_MODE: Final[str] = "dio"
+SOLO_FLASH_FREQ: Final[str] = "80m"
+# A stock Arduino-ESP32 layout keeps its app at 0x10000; "migrate from stock" erases
+# what it left where the new phy_init, cancfg and bootcnt partitions now live.
+STOCK_MIGRATION_ERASE_OFFSET: Final[int] = 0x10000
+STOCK_MIGRATION_ERASE_SIZE: Final[int] = 0x10000
+OTADATA_SIZE: Final[int] = 0x2000  # two 4 KB otadata sectors
+# esp_ota_select_entry_t (esp_flash_partitions.h): ota_seq, seq_label[20], ota_state,
+# crc. The bootloader boots slot (ota_seq - 1) % <slot count>, so sequence 1 is ota_0.
+_OTA_SEQ_OTA_0: Final[int] = 1
+_OTA_SEQ_LABEL_SIZE: Final[int] = 20
+# UNDEFINED, not PENDING_VERIFY: a USB install is not a rollback candidate.
+_OTA_IMG_UNDEFINED: Final[int] = 0xFFFFFFFF
+_ESP_IMAGE_MAGIC: Final[bytes] = b"\xe9"
+_SOLO_FILE_KEYS: Final[tuple[str, ...]] = ("bootloader", "updater", "otadata")
+_HEX_PREFIX: Final[str] = "0x"
+
+GhRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
+
+
+@dataclass(frozen=True, slots=True)
+class SoloLayout:
+    """One flash layout of a bundle's manifest: its partition-table image, size and offsets."""
+
+    table: Path
+    flash_size: str
+    bootloader: int
+    table_offset: int
+    otadata: int
+    cancfg: int
+    factory: int
+    ota_0: int
+
+
+@dataclass(frozen=True, slots=True)
+class SoloBundle:
+    """A validated release bundle: its version, the shared images and its flash layouts."""
+
+    version: str
+    bootloader: Path
+    updater: Path
+    otadata: Path
+    layouts: dict[str, SoloLayout]
+
+
+def _manifest_name(parent: str, key: str) -> str:
+    return f"{parent}.{key}" if parent else key
+
+
+def _manifest_field(table: dict[str, object], key: str, parent: str) -> object:
+    if key not in table:
+        raise BundleError(f"manifest.json has no {_manifest_name(parent, key)!r}")
+    return table[key]
+
+
+def _manifest_table(value: object, name: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise BundleError(f"manifest.json {name!r} must be an object")
+    return value
+
+
+def _manifest_str(table: dict[str, object], key: str, parent: str) -> str:
+    value = _manifest_field(table, key, parent)
+    if not isinstance(value, str):
+        raise BundleError(f"manifest.json {_manifest_name(parent, key)!r} must be a string")
+    return value
+
+
+def _manifest_offset(table: dict[str, object], key: str, parent: str) -> int:
+    text = _manifest_str(table, key, parent)
+    try:
+        if not text.lower().startswith(_HEX_PREFIX):
+            raise ValueError(text)
+        return int(text, 16)
+    except ValueError:
+        raise BundleError(
+            f"manifest.json {_manifest_name(parent, key)!r} must be a hex offset like "
+            f"'0x8000', got {text!r}"
+        ) from None
+
+
+def _bundle_file(bundle_dir: Path, table: dict[str, object], key: str, parent: str) -> Path:
+    name = _manifest_str(table, key, parent)
+    # Bare file names only: a manifest must not point outside its own bundle.
+    if not name or Path(name).name != name or name in (".", ".."):
+        raise BundleError(
+            f"manifest.json {_manifest_name(parent, key)!r} must be a file name in the bundle, "
+            f"got {name!r}"
+        )
+    path = bundle_dir / name
+    if not path.is_file():
+        raise BundleError(f"Bundle file {name!r} ({_manifest_name(parent, key)}) is missing")
+    return path
+
+
+def _parse_solo_layout(bundle_dir: Path, name: str, value: object) -> SoloLayout:
+    parent = f"layouts.{name}"
+    table = _manifest_table(value, parent)
+    layout = SoloLayout(
+        table=_bundle_file(bundle_dir, table, "table", parent),
+        flash_size=_manifest_str(table, "flash_size", parent),
+        bootloader=_manifest_offset(table, "bootloader", parent),
+        table_offset=_manifest_offset(table, "table_offset", parent),
+        otadata=_manifest_offset(table, "otadata", parent),
+        cancfg=_manifest_offset(table, "cancfg", parent),
+        factory=_manifest_offset(table, "factory", parent),
+        ota_0=_manifest_offset(table, "ota_0", parent),
+    )
+    # The firmware reads cancfg at this fixed offset; a bundle moving it is incompatible.
+    if layout.cancfg != DEFAULT_CANCFG_OFFSET:
+        raise BundleError(
+            f"manifest.json {parent}.cancfg is 0x{layout.cancfg:X}; the SOLO firmware reads "
+            f"cancfg at 0x{DEFAULT_CANCFG_OFFSET:X}"
+        )
+    return layout
+
+
+def load_solo_bundle(bundle_dir: Path) -> SoloBundle:
+    """Read and validate an unzipped SOLO release bundle's ``manifest.json``.
+
+    The manifest must be format 1 for the esp32s3 with dio/80m flash, name existing
+    bare files for the bootloader, updater and otadata, and give every layout an
+    existing partition-table image, a flash size and hex offsets, with cancfg at
+    ``DEFAULT_CANCFG_OFFSET``.
+
+    Raises:
+        BundleError: the manifest is missing, not JSON, or breaks any rule above.
+    """
+    bundle_dir = Path(bundle_dir)
+    manifest_path = bundle_dir / SOLO_MANIFEST_NAME
+    if not manifest_path.is_file():
+        raise BundleError(
+            f"No {SOLO_MANIFEST_NAME} in {bundle_dir}; is this an unzipped "
+            f"{SOLO_BUNDLE_ASSET_PATTERN} bundle?"
+        )
+    try:
+        raw: object = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except ValueError as exc:  # JSONDecodeError and UnicodeDecodeError
+        raise BundleError(f"{manifest_path} is not valid JSON: {exc}") from exc
+    manifest = _manifest_table(raw, "manifest")
+
+    supported: dict[str, object] = {
+        "format": SOLO_MANIFEST_FORMAT,
+        "chip": NODE_CHIP,
+        "flash_mode": SOLO_FLASH_MODE,
+        "flash_freq": SOLO_FLASH_FREQ,
+    }
+    for key, expected in supported.items():
+        value = _manifest_field(manifest, key, "")
+        # type() check too: JSON true must not pass for format 1.
+        if type(value) is not type(expected) or value != expected:
+            raise BundleError(
+                f"manifest.json {key!r} is {value!r}; this tool supports {expected!r}"
+            )
+
+    files = _manifest_table(_manifest_field(manifest, "files", ""), "files")
+    bootloader, updater, otadata = (
+        _bundle_file(bundle_dir, files, key, "files") for key in _SOLO_FILE_KEYS
+    )
+    layouts = _manifest_table(_manifest_field(manifest, "layouts", ""), "layouts")
+    return SoloBundle(
+        version=_manifest_str(manifest, "version", ""),
+        bootloader=bootloader,
+        updater=updater,
+        otadata=otadata,
+        layouts={
+            name: _parse_solo_layout(bundle_dir, name, value) for name, value in layouts.items()
+        },
+    )
+
+
+def otadata_selecting_ota0() -> bytes:
+    """Return an 8 KB otadata image whose first entry selects ota_0; the rest is erased.
+
+    A port of Airform-SOLO-ODU-Controller/scripts/ota_slot_upload.py: ota_seq 1,
+    seq_label 0xFF, ota_state UNDEFINED and crc32(ota_seq, 0xFFFFFFFF).
+    """
+    ota_seq = struct.pack("<I", _OTA_SEQ_OTA_0)
+    # bootloader_common_ota_select_crc() is esp_rom_crc32_le(UINT32_MAX, &ota_seq, 4). The
+    # ROM function inverts on entry and exit as zlib does, so the same seed gives the same
+    # value (IDF's otatool.py: binascii.crc32(seq, 0xFFFFFFFF)).
+    crc = zlib.crc32(ota_seq, 0xFFFFFFFF) & 0xFFFFFFFF
+    entry = ota_seq + b"\xff" * _OTA_SEQ_LABEL_SIZE + struct.pack("<II", _OTA_IMG_UNDEFINED, crc)
+    return entry.ljust(OTADATA_SIZE, b"\xff")
+
+
+def _checked_app_image(app: Path) -> Path:
+    app = Path(app)
+    if not app.is_file():
+        raise FileNotFoundError(f"Application file not found: {app}")
+    with app.open("rb") as image:
+        magic = image.read(len(_ESP_IMAGE_MAGIC))
+    if magic != _ESP_IMAGE_MAGIC:
+        raise FlasherError(f"{app} is not an ESP app image (first byte must be 0xE9)")
+    return app
+
+
+def _first_difference(expected: bytes, actual: bytes) -> int:
+    for index, (want, got) in enumerate(zip(expected, actual, strict=False)):
+        if want != got:
+            return index
+    return min(len(expected), len(actual))
+
+
+def flash_solo(
+    profile: BoardProfile,
+    port: str,
+    bundle_dir: Path,
+    app: Path | None = None,
+    migrate_stock: bool = False,
+    manufacturer: str = DEFAULT_MANUFACTURER,
+    baud: int = DEFAULT_BAUD_RATE,
+    progress: ProgressCallback | None = None,
+    log: LogCallback | None = None,
+    runner: EsptoolRunner = _run_esptool,
+) -> None:
+    """Flash a SOLO board from an unzipped release bundle, verify cancfg, then reset it.
+
+    Steps, over the board's own USB port:
+
+    1. With ``migrate_stock``, erase 0x10000..0x1FFFF (a stock Arduino app's leftovers).
+    2. One ``write-flash --flash-mode dio --flash-freq 80m --flash-size <layout>`` of the
+       bootloader, the layout's partition table, the blank otadata, the CAN updater at
+       the layout's ``factory`` offset and the board's cancfg image (v2 block + profile
+       record, 4 KB) at 0x11000.
+    3. Read cancfg back and compare it byte-for-byte.
+    4. With ``app``, write it at ``ota_0`` plus an otadata image selecting ota_0;
+       without it the board boots the CAN updater.
+
+    The last step ends with ``--after watchdog-reset``. Everything is validated before
+    the first esptool call.
+
+    Raises:
+        BundleError: the bundle is invalid or lacks the profile's layout.
+        FileNotFoundError, FlasherError: ``app`` is missing or not an ESP image.
+        InvalidNameError: ``manufacturer`` violates the block contract.
+        FlashFailedError: esptool failed, or the cancfg read-back differs.
+    """
+    from .board_profile import build_cancfg_image
+
+    bundle = load_solo_bundle(bundle_dir)
+    layout = bundle.layouts.get(profile.layout)
+    if layout is None:
+        raise BundleError(
+            f"Bundle {bundle.version} has no {profile.layout!r} layout "
+            f"(it has: {', '.join(bundle.layouts) or 'none'})"
+        )
+    if layout.flash_size != profile.flash_size:
+        raise BundleError(
+            f"Bundle layout {profile.layout!r} is {layout.flash_size}; "
+            f"{profile.product} needs {profile.flash_size}"
+        )
+    app_path = _checked_app_image(app) if app is not None else None
+    cancfg = build_cancfg_image(profile.config_block(manufacturer), profile.record)
+
+    def _log(msg: str) -> None:
+        if log is not None:
+            log(msg)
+
+    _log(f"Flashing {profile.product} ({profile.layout}, bundle {bundle.version}) on {port}")
+    with tempfile.TemporaryDirectory() as tmp:
+        cancfg_path = Path(tmp) / "cancfg.bin"
+        cancfg_path.write_bytes(cancfg)
+        if migrate_stock:
+            _log("Erasing the stock layout's leftovers")
+            _run_node_esptool(
+                port,
+                baud,
+                [
+                    "erase-region",
+                    f"0x{STOCK_MIGRATION_ERASE_OFFSET:X}",
+                    f"0x{STOCK_MIGRATION_ERASE_SIZE:X}",
+                ],
+                log,
+                runner=runner,
+                after="no-reset",
+            )
+        _log("Writing bootloader, partition table, otadata, CAN updater and cancfg")
+        _run_node_esptool(
+            port,
+            baud,
+            [
+                "write-flash",
+                "--flash-mode",
+                SOLO_FLASH_MODE,
+                "--flash-freq",
+                SOLO_FLASH_FREQ,
+                "--flash-size",
+                layout.flash_size,
+                f"0x{layout.bootloader:X}",
+                str(bundle.bootloader),
+                f"0x{layout.table_offset:X}",
+                str(layout.table),
+                f"0x{layout.otadata:X}",
+                str(bundle.otadata),
+                f"0x{layout.factory:X}",
+                str(bundle.updater),
+                f"0x{layout.cancfg:X}",
+                str(cancfg_path),
+            ],
+            log,
+            progress,
+            runner,
+            after="no-reset",
+        )
+        readback = _read_node_flash(
+            port,
+            baud,
+            layout.cancfg,
+            len(cancfg),
+            log,
+            runner,
+            after="no-reset" if app_path is not None else "watchdog-reset",
+        )
+        if readback != cancfg:
+            raise FlashFailedError(
+                f"cancfg read-back mismatch at 0x{layout.cancfg:X}: first difference at "
+                f"+0x{_first_difference(cancfg, readback):X} ({len(readback)} bytes read)"
+            )
+        _log("cancfg verified.")
+        if app_path is not None:
+            otadata_path = Path(tmp) / "otadata_ota0.bin"
+            otadata_path.write_bytes(otadata_selecting_ota0())
+            _log(f"Writing {app_path.name} @ ota_0 and otadata selecting ota_0")
+            _run_node_esptool(
+                port,
+                baud,
+                [
+                    "write-flash",
+                    f"0x{layout.ota_0:X}",
+                    str(app_path),
+                    f"0x{layout.otadata:X}",
+                    str(otadata_path),
+                ],
+                log,
+                progress,
+                runner,
+                after="watchdog-reset",
+            )
+    _log("Done.")
+
+
+def _run_gh(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
+
+
+def _bundle_root(extract_dir: Path) -> Path:
+    """Return the directory holding manifest.json: the zip's root or its one top folder."""
+    if (extract_dir / SOLO_MANIFEST_NAME).is_file():
+        return extract_dir
+    nested = [d for d in extract_dir.iterdir() if (d / SOLO_MANIFEST_NAME).is_file()]
+    if len(nested) != 1:
+        raise BundleError(f"No {SOLO_MANIFEST_NAME} at the top of the bundle in {extract_dir}")
+    return nested[0]
+
+
+def fetch_solo_bundle(
+    tag: str,
+    dest: Path,
+    log: LogCallback | None = None,
+    run_gh: GhRunner = _run_gh,
+) -> Path:
+    """Download release ``tag``'s SOLO bundle with the GitHub CLI and unzip it under ``dest``.
+
+    Runs ``gh release download -R XiaoKChen/Embedded-CAN-Bootloaders <tag> -p
+    "esp32s3-can-updater-*.zip"`` into ``dest/download`` and extracts the one zip next
+    to it. Returns the directory holding ``manifest.json``, ready for flash_solo.
+
+    Raises:
+        BundleError: gh is not installed, the release or asset does not exist (e.g. a
+            tag not yet published), the download fails, or the zip is unusable.
+    """
+    dest = Path(dest)
+    download_dir = dest / "download"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    args = [
+        "release",
+        "download",
+        "-R",
+        SOLO_BUNDLE_REPO,
+        tag,
+        "-p",
+        SOLO_BUNDLE_ASSET_PATTERN,
+        "-D",
+        str(download_dir),
+    ]
+    if log:
+        log("gh " + " ".join(args))
+    try:
+        result = run_gh(args)
+    except FileNotFoundError:
+        raise BundleError(
+            "The GitHub CLI (gh) is not on PATH. Install it and run `gh auth login`, or pass "
+            "a local bundle directory."
+        ) from None
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        if "release not found" in detail.lower():
+            raise BundleError(
+                f"Release {tag!r} not found in {SOLO_BUNDLE_REPO}; it may not be published yet. "
+                "Pass a local bundle directory instead."
+            )
+        raise BundleError(
+            f"gh release download of {tag!r} failed (exit {result.returncode}): {detail}"
+        )
+    zips = sorted(download_dir.glob("*.zip"))
+    if len(zips) != 1:
+        raise BundleError(
+            f"Expected one {SOLO_BUNDLE_ASSET_PATTERN} asset in release {tag!r}, got {len(zips)}"
+        )
+    extract_dir = dest / zips[0].stem
+    try:
+        with zipfile.ZipFile(zips[0]) as archive:
+            # extractall drops absolute paths and ".." components, so nothing lands
+            # outside extract_dir.
+            archive.extractall(extract_dir)
+    except zipfile.BadZipFile as exc:
+        raise BundleError(f"{zips[0].name} is not a valid zip: {exc}") from exc
+    if log:
+        log(f"Unzipped {zips[0].name} to {extract_dir}")
+    return _bundle_root(extract_dir)

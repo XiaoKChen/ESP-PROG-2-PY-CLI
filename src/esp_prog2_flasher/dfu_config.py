@@ -1,21 +1,26 @@
-"""Encode the DFU config block written to the RA4M1 data flash.
+"""Encode and decode the DFU config block read by the RA4M1 bootloader and ESP32-S3 CAN nodes.
 
 Builds the 80-byte v2 block (USB manufacturer/product names plus an optional per-device
 bootloader CAN ID pair) that the bootloader reads at boot, and validates its inputs at the
-boundary. flasher.py programs the result to CONFIG_ADDRESS; cli.py and app.py offer the names.
+boundary. flasher.py programs the result to CONFIG_ADDRESS (RA4M1) or a node's cancfg
+partition; cli.py and app.py offer the names. parse_config_block decodes a block read back
+from a device exactly as the firmware's dfu_config_parse/dfu_config_can_ids do.
 
 Owns:        the block layout, CONFIG_ADDRESS, DEVICE_CAN_IDS (the single source of truth for
              known devices and their fixed CAN ID pairs; DEVICE_NAMES derives from its keys),
              and the provisioning defaults (DEFAULT_MANUFACTURER).
 Not here:    programming and read-back verification of the block (flasher.py); the bootloader's
              own default CAN IDs (it owns 0x79E/0x79F — they are only mirrored here for help
-             text).
+             text and the decoder's fallback); reading the block off a device (flasher.py).
 Invariants:  FROZEN CONTRACT — the layout, magic, version, CRC, CONFIG_ADDRESS and field limits
              are shared byte-for-byte with the bootloader that reads this block. Do not change
              any of them without changing the bootloader too. The provisioning defaults and
-             DATA_FLASH_ENABLE_ADDR are not part of the contract.
+             DATA_FLASH_ENABLE_ADDR are not part of the contract. The encoder writes v2 only;
+             the decoder, like the firmware, also accepts a legacy v1 block (76 bytes, no CAN
+             IDs, CRC over the first 72 bytes at 0x48).
 Errors:      raises DfuConfigError subclasses: InvalidNameError for a bad name,
              InvalidCanIdError for an out-of-range or half-specified CAN ID pair.
+             parse_config_block never raises: an invalid block decodes to None.
 Depends on:  the standard library only.
 See also:    tests/test_dfu_config.py, flasher.py
 
@@ -39,6 +44,7 @@ from __future__ import annotations
 
 import struct
 import zlib
+from dataclasses import dataclass
 from typing import Final
 
 # FROZEN CONTRACT — mirrored in the bootloader; never change without changing both.
@@ -49,12 +55,21 @@ CONFIG_ADDRESS: Final[int] = 0x40101C00  # RA4M1 data flash, last 1 KB block.
 DATA_FLASH_ENABLE_ADDR: Final[int] = 0x407EC090
 CONFIG_MAGIC: Final[int] = 0xDF0C0FDF
 CONFIG_VERSION: Final[int] = 2
+# Legacy layout the firmware still accepts on read: no CAN-ID fields, CRC at 0x48.
+CONFIG_VERSION_V1: Final[int] = 1
 MAX_STRING_LEN: Final[int] = 32
 BLOCK_SIZE: Final[int] = 80
 _PAD_BYTE: Final[int] = 0xFF
 _RESERVED_BYTE: Final[int] = 0xFF
+# magic, version, mfr_len, prod_len, reserved.
+_HEADER_FORMAT: Final[str] = "<IBBBB"
+_HEADER_SIZE: Final[int] = struct.calcsize(_HEADER_FORMAT)  # 8
+_MFR_OFFSET: Final[int] = _HEADER_SIZE  # 0x08
+_PROD_OFFSET: Final[int] = _MFR_OFFSET + MAX_STRING_LEN  # 0x28
+_CAN_IDS_OFFSET: Final[int] = _PROD_OFFSET + MAX_STRING_LEN  # 0x48
 # CRC covers everything before the trailing u32 crc field.
 _CRC_COVERAGE: Final[int] = BLOCK_SIZE - 4  # 76
+_CRC_COVERAGE_V1: Final[int] = _CAN_IDS_OFFSET  # 72 — v1 has no CAN-ID fields
 _MIN_ASCII: Final[int] = 0x20
 _MAX_ASCII: Final[int] = 0x7E
 
@@ -63,8 +78,8 @@ _MAX_ASCII: Final[int] = 0x7E
 # falls back to its compiled-in defaults below. 11-bit classic-CAN IDs only.
 UNSET_CAN_ID: Final[int] = 0xFFFF
 MAX_CAN_ID: Final[int] = 0x7FF  # 11-bit standard CAN identifier ceiling.
-# Bootloader fallback IDs when the pair is left unset — documented here for the
-# CLI/TUI help text; the *bootloader* owns these values, not this block.
+# Bootloader fallback IDs when an ID is unset or out of range — mirrored here for the
+# CLI/TUI help text and parse_config_block; the *bootloader* owns these values.
 DEFAULT_BOOT_CMD_ID: Final[int] = 0x79E  # host→boot
 DEFAULT_BOOT_REPLY_ID: Final[int] = 0x79F  # boot→host
 
@@ -93,6 +108,8 @@ DEVICE_CAN_IDS: Final[dict[str, tuple[int, int]]] = {
     "IDU Radar": (0x01, 0x02),
     "IDU Articulation": (0x05, 0x06),
     "IDU Air Sensor": (0x03, 0x04),
+    "SOLO ODU Controller": (0x05, 0x06),
+    "SOLO IDU Controller": (0x07, 0x08),
 }
 # Derived, never stored separately: the ordered device list is just these keys.
 DEVICE_NAMES: Final[tuple[str, ...]] = tuple(DEVICE_CAN_IDS)
@@ -108,6 +125,21 @@ class InvalidNameError(DfuConfigError):
 
 class InvalidCanIdError(DfuConfigError):
     """Raised when a boot CAN ID is out of range or the pair is half-specified."""
+
+
+@dataclass(frozen=True, slots=True)
+class DfuConfig:
+    """A decoded, CRC-valid config block as the firmware applies it.
+
+    ``boot_cmd_id``/``boot_reply_id`` are the IDs the device will actually use:
+    each falls back to its default (0x79E/0x79F) independently when the stored
+    field is unset or not an 11-bit ID, and both are defaults for a v1 block.
+    """
+
+    manufacturer: str
+    product: str
+    boot_cmd_id: int
+    boot_reply_id: int
 
 
 def boot_ids_for_device(name: str) -> tuple[int, int] | None:
@@ -207,7 +239,7 @@ def build_config_block(
     cmd_id, reply_id = _resolve_can_id_pair(boot_cmd_id, boot_reply_id)
 
     header = struct.pack(
-        "<IBBBB",
+        _HEADER_FORMAT,
         CONFIG_MAGIC,
         CONFIG_VERSION,
         len(mfr),
@@ -221,3 +253,48 @@ def build_config_block(
     block = body + struct.pack("<I", crc)
     assert len(block) == BLOCK_SIZE  # noqa: S101 — guards the frozen layout.
     return block
+
+
+def _effective_can_id(stored: int, default: int) -> int:
+    return stored if stored <= MAX_CAN_ID else default
+
+
+def parse_config_block(data: bytes) -> DfuConfig | None:
+    """Decode a config block read from a device, or ``None`` if it is invalid.
+
+    Mirrors the firmware's ``dfu_config_parse``/``dfu_config_can_ids``: the block
+    is valid only when the magic matches, the version is 1 or 2, both name
+    lengths are <= 32 and that version's CRC32 matches. ``None`` means
+    unprovisioned (e.g. erased 0xFF flash) or corrupt, and the device then uses
+    its defaults (0x79E/0x79F, empty name). Bytes past ``BLOCK_SIZE`` are ignored.
+    """
+    if len(data) < BLOCK_SIZE:
+        return None
+    magic, version, mfr_len, prod_len, _reserved = struct.unpack_from(_HEADER_FORMAT, data)
+    if magic != CONFIG_MAGIC:
+        return None
+    if version == CONFIG_VERSION:
+        crc_coverage = _CRC_COVERAGE
+    elif version == CONFIG_VERSION_V1:
+        crc_coverage = _CRC_COVERAGE_V1
+    else:
+        return None
+    if mfr_len > MAX_STRING_LEN or prod_len > MAX_STRING_LEN:
+        return None
+    (stored_crc,) = struct.unpack_from("<I", data, crc_coverage)
+    if zlib.crc32(data[:crc_coverage]) & 0xFFFFFFFF != stored_crc:
+        return None
+
+    cmd_id, reply_id = DEFAULT_BOOT_CMD_ID, DEFAULT_BOOT_REPLY_ID
+    if version == CONFIG_VERSION:
+        stored_cmd, stored_reply = struct.unpack_from("<HH", data, _CAN_IDS_OFFSET)
+        cmd_id = _effective_can_id(stored_cmd, DEFAULT_BOOT_CMD_ID)
+        reply_id = _effective_can_id(stored_reply, DEFAULT_BOOT_REPLY_ID)
+    # The firmware does not re-check the name bytes once the CRC authenticates them;
+    # replace any non-ASCII byte rather than reject a block the device accepts.
+    return DfuConfig(
+        manufacturer=data[_MFR_OFFSET : _MFR_OFFSET + mfr_len].decode("ascii", "replace"),
+        product=data[_PROD_OFFSET : _PROD_OFFSET + prod_len].decode("ascii", "replace"),
+        boot_cmd_id=cmd_id,
+        boot_reply_id=reply_id,
+    )
