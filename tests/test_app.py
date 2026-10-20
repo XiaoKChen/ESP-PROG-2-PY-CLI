@@ -9,7 +9,7 @@ Covers:       mounting at 80x24 and 120x40 with every tab's controls on screen; 
               into an Input instead of firing; Esc handing focus back to the tab strip; the
               help screen listing the key map; the confirm dialog gating a flash (Esc never
               calls the flasher, Enter does); global keys staying inert under a modal; the
-              palette commands; the SOLO tab's provision and read calls.
+              palette commands; the SOLO tab's port picker, provision and read calls.
 Not covered:  the flasher calls themselves (tests/test_flasher.py, tests/test_psoc6.py), the
               file picker's tree browsing, and visual styling.
 See also:     src/esp_prog2_flasher/app.py, src/esp_prog2_flasher/tui/screens.py
@@ -44,6 +44,7 @@ def no_hardware(monkeypatch: pytest.MonkeyPatch) -> None:
         flasher, "detect", lambda **_: DetectResult(TargetState.NO_PROBE, "no probe (test)")
     )
     monkeypatch.setattr(flasher, "find_probe_serial", lambda: None)
+    monkeypatch.setattr(flasher, "list_serial_ports", lambda: [])
 
 
 def run_app(test: AppTest, size: tuple[int, int] = (80, 24)) -> None:
@@ -254,6 +255,26 @@ def test_solo_actions_need_the_board_port(monkeypatch: pytest.MonkeyPatch) -> No
         await app_workers_done(app)
         assert len(app.screen_stack) == 1
         assert calls == []
+
+    run_app(check)
+
+
+def test_picking_a_detected_port_fills_the_solo_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    ports = [
+        flasher.SerialPortInfo("COM3", "USB Serial", flasher.ESP_PROG_VID, flasher.ESP_PROG_PID),
+        flasher.SerialPortInfo(SOLO_PORT, "USB Serial", flasher.ESP_PROG_VID, 0x1001),
+    ]
+    monkeypatch.setattr(flasher, "list_serial_ports", lambda: ports)
+
+    async def check(app: FlasherApp, pilot: Pilot[None]) -> None:
+        await pilot.press("4")
+        app.query_one("#refresh_solo_ports", Button).press()
+        await pilot.pause()
+        hint = app.query_one("#solo_port_hint", Static).render()
+        assert "not COM3" in str(hint)
+        app.query_one("#solo_port_pick", Select).value = SOLO_PORT
+        await pilot.pause()
+        assert app.query_one("#solo_port", Input).value == SOLO_PORT
 
     run_app(check)
 

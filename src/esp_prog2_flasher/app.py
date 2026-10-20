@@ -113,6 +113,8 @@ _BITRATE_LABELS: Final[dict[Bitrate, str]] = {
     Bitrate.MBPS_1: "1 Mbit/s",
 }
 _LOG_EXPANDED_CLASS: Final[str] = "-log-expanded"
+# ESP32-S3 USB-Serial-JTAG / ROM download PID: a SOLO board, or an ESP-Prog-2 in download mode.
+_ESP32S3_USB_JTAG_PID: Final[int] = 0x1001
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +215,15 @@ def _picker_start(current: str) -> Path:
     return start if start.is_dir() else Path.cwd()
 
 
+def _port_label(port: flasher.SerialPortInfo) -> str:
+    """Name a serial port by what it is when its USB ID says so, else by its OS description."""
+    if port.is_esp_prog_bridge:
+        return "ESP-Prog-2 bridge (not a SOLO board)"
+    if port.vid == flasher.ESP_PROG_VID and port.pid == _ESP32S3_USB_JTAG_PID:
+        return "ESP32-S3 USB (SOLO board, or ESP-Prog-2 in download mode)"
+    return port.description
+
+
 class FlasherApp(App[None]):
     """Detect the ESP-Prog-2; flash the RA4M1 (bootloader/config, app), PSoC 6, or the probe."""
 
@@ -234,6 +245,7 @@ class FlasherApp(App[None]):
     .buttons Button { margin: 0 1 0 0; }
     #boot_reply_label { width: auto; padding: 0 1; }
     #solo_port_hint { width: auto; color: $warning; padding: 0 0 0 1; }
+    #solo_port_pick { width: 1fr; }
     .result { height: auto; margin: 1 0 0 0; }
     .ok { color: $success; text-style: bold; }
     .warn { color: $warning; text-style: bold; }
@@ -399,6 +411,10 @@ class FlasherApp(App[None]):
                     placeholder="the board's own USB port, e.g. COM7", id="solo_port", compact=True
                 )
                 yield Static("", id="solo_port_hint")
+            with Horizontal(classes="row"):
+                yield Label("Detected ports:")
+                yield Select([], prompt="pick to fill the port", id="solo_port_pick", compact=True)
+                yield Button("Refresh", id="refresh_solo_ports", compact=True)
             with Horizontal(classes="row"):
                 yield Label("Bundle release:")
                 yield Input(value=flasher.DEFAULT_SOLO_BUNDLE_TAG, id="solo_tag", compact=True)
@@ -973,6 +989,10 @@ class FlasherApp(App[None]):
         fields (editable; blank → bootloader defaults). BLANK (keep default) →
         hide the name input and leave the ID fields empty and editable.
         """
+        if event.select.id == "solo_port_pick":
+            if event.value is not Select.BLANK:
+                self._main.query_one("#solo_port", Input).value = str(event.value)
+            return
         if event.select.id != "prod_select":
             return
         value = event.value
@@ -1012,6 +1032,7 @@ class FlasherApp(App[None]):
             "read_solo_config": self.action_read_solo_config,
             "browse_solo_bundle": self.action_browse_solo_bundle,
             "browse_solo_app": self.action_browse_solo_app,
+            "refresh_solo_ports": self._refresh_serial_status,
             "quit": self.exit,
         }
         handler = handlers.get(event.button.id or "")
@@ -1213,8 +1234,13 @@ class FlasherApp(App[None]):
 
     def _refresh_serial_status(self) -> None:
         serial = flasher.find_probe_serial()
+        ports = flasher.list_serial_ports()
+        bridge = next((port.device for port in ports if port.is_esp_prog_bridge), None)
         self._main.query_one("#solo_port_hint", Static).update(
-            Text(f"not {serial.device}: that is the ESP-Prog-2") if serial else ""
+            Text(f"not {bridge}: that is the ESP-Prog-2") if bridge else ""
+        )
+        self._main.query_one("#solo_port_pick", Select).set_options(
+            (f"{port.device}  {_port_label(port)}", port.device) for port in ports
         )
         if serial is None:
             self._set_status("serial", "warn", "Serial: no ESP-Prog-2 port")
