@@ -709,6 +709,30 @@ def find_probe_serial() -> ProbeSerial | None:
     return ProbeSerial(chosen.device, chosen.pid or 0)
 
 
+@dataclass(frozen=True, slots=True)
+class SerialPortInfo:
+    """One serial port as the OS lists it."""
+
+    device: str
+    description: str
+    vid: int | None
+    pid: int | None
+
+    @property
+    def is_esp_prog_bridge(self) -> bool:
+        # Only the running bridge is unambiguous: in ROM download mode the ESP-Prog-2
+        # enumerates as 303A:1001, the same as any ESP32-S3 board on USB-Serial-JTAG.
+        return self.vid == ESP_PROG_VID and self.pid == ESP_PROG_PID
+
+
+def list_serial_ports() -> list[SerialPortInfo]:
+    """List every serial port, sorted by device name, for picking a SOLO board's port."""
+    from serial.tools import list_ports
+
+    ports = (SerialPortInfo(p.device, p.description, p.vid, p.pid) for p in list_ports.comports())
+    return sorted(ports, key=lambda port: port.device)
+
+
 def download_probe_firmware(dest: Path | None = None, log: LogCallback | None = None) -> Path:
     """Download Espressif's OFFICIAL esp-prog2.bin (JTAG build) for reference.
 
