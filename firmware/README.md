@@ -20,15 +20,20 @@ ESP-Prog-2's ESP32-S3, with two changes from Espressif's stock image:
 Use the TUI (*ESP-Prog-2 · USB › Probe firmware*, then `enter`) or the CLI:
 
 ```sh
-uv run esp-prog2-flasher --flash-probe        # flashes the bundled esp-prog2.bin
+uv run esp-prog2-flasher --list                      # find the download-mode port
+uv run esp-prog2-flasher --flash-probe --port COM9   # flashes the bundled esp-prog2.bin
 ```
 
 **Put the board in ROM download mode first** (the running bridge firmware can't
 reflash itself over its CDC port):
 
 1. Hold **BOOT**, tap **RESET** (or hold BOOT while plugging in USB).
-2. It re-enumerates as an ESP32-S3 ROM device (new COM port / PID); the TUI
-   confirm step then shows the port as "download mode".
+2. It re-enumerates as an ESP32-S3 ROM device (`303A:1001`, new COM port).
+   That ID is shared with every ESP32-S3 board on USB, a SOLO board included,
+   so the port is never picked automatically: `--list` shows it as
+   "ESP32-S3 download mode — ESP-Prog-2 or a SOLO board", the CLI needs
+   `--port`, and the TUI wizard asks you to pick it. Unplug other ESP32-S3
+   boards if you are unsure which port is the probe.
 3. Run the flash; esptool writes `esp-prog2.bin` at `0x0` and resets.
 
 After flashing it should enumerate as **CMSIS-DAP** (pyOCD sees it) with **no
