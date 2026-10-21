@@ -15,7 +15,7 @@ import pytest
 
 from esp_prog2_flasher import cli, flasher
 from esp_prog2_flasher.board_profile import SOLO_PROFILES
-from esp_prog2_flasher.dfu_config import DEFAULT_MANUFACTURER
+from esp_prog2_flasher.dfu_config import DEFAULT_MANUFACTURER, DfuConfig
 
 
 def _provision(monkeypatch: pytest.MonkeyPatch, product: str) -> dict[str, Any]:
@@ -44,3 +44,27 @@ def test_provision_node_writes_the_block_alone_for_other_products(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert _provision(monkeypatch, "Some Other Board")["profile"] is None
+
+
+def test_read_node_config_prints_the_block_and_the_board_profile(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    record = SOLO_PROFILES["SOLO ODU Controller"].record
+    node = flasher.NodeConfig(DfuConfig(DEFAULT_MANUFACTURER, "SOLO ODU Controller", 5, 6), record)
+    monkeypatch.setattr(flasher, "read_node_config", lambda *_a, **_k: node)
+    cli._read_node_config("COM9")
+    out = capsys.readouterr().out
+    assert "Product:      SOLO ODU Controller" in out
+    assert "Board profile: TWAI tx GPIO4 rx GPIO5, 250 kbit/s, hold-LOW mask 0x0" in out
+
+
+def test_read_node_config_says_when_there_is_no_board_profile(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        flasher, "read_node_config", lambda *_a, **_k: flasher.NodeConfig(None, None)
+    )
+    cli._read_node_config("COM9")
+    out = capsys.readouterr().out
+    assert "unprovisioned/invalid" in out
+    assert "Board profile: no board profile (updater defaults: TWAI tx GPIO4" in out

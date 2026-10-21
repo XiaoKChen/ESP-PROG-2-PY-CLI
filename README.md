@@ -93,8 +93,9 @@ The TUI is a keyboard-driven dashboard in the style of
   `ESP-Prog-2 · USB` (*Probe firmware*). Each row shows its image, or a SOLO
   preset's layout and CAN IDs. `enter`, `→` and `←` fold a group. Below, a
   `── Recent ──` section lists this session's runs, newest first: target,
-  port or image, `✓`/`✗` and how long ago. Recents are not kept between
-  sessions.
+  port or image, `✓`/`✗` and how long ago. Recents, settings, the selection and
+  folded groups are remembered between launches (see
+  [Saved state](#saved-state)).
 - **Details** (right): the selection's settings (chip, image path, address or
   layout, USB names and CAN IDs, port, TWAI pins and bitrate, detect state,
   last run), then the commands valid for it. Hidden below 80 columns.
@@ -126,7 +127,30 @@ the current screen and selection. The next key runs one and closes the popup;
 | `n` | provision the preset's cancfg, like `--provision-node` | SOLO |
 | `r` | read the board's config, like `--read-node-config` | SOLO |
 | `g` | get Espressif's official (JTAG) probe image, saved beside the bundled build | ESP-Prog-2 |
+| `c` | forget the saved state (deletes the file, resets this session to the defaults) | everywhere |
 | `l` / `?` / `q` | session log / full help / quit | everywhere |
+
+### Saved state
+
+The TUI remembers its choices between launches in one JSON file per user:
+`%APPDATA%\esp-prog2-flasher\state.json` on Windows, otherwise
+`$XDG_CONFIG_HOME/esp-prog2-flasher/state.json` (default
+`~/.config/esp-prog2-flasher/state.json`).
+
+- **What:** the bootloader, application, PSoC 6 and SOLO settings (images, device
+  and names, custom CAN IDs, Embassy, SOLO port, bundle, app, migrate flag), the
+  last 10 Recent runs, the selected row, folded groups and, per picker kind
+  (`.hex`, app `.bin`, bundle folder), the last 5 files picked, listed under
+  `── Recent ──` at the top of the file browser. Nothing sensitive is stored.
+- **When:** written atomically after every edit, confirmed run or fold, and on
+  quit. Headless flags never read or write it.
+- **Bad or moved files:** a saved path that no longer exists falls back to its
+  default (the bundled image, or empty) with one `!` status line. A corrupt file
+  is ignored with a `!` line and replaced on the next save. A file from a newer
+  version, or in an unknown format, is ignored and never overwritten; `/ c`
+  deletes it.
+- **Opting out:** `/ c` forgets the saved state; `--no-state` skips loading and
+  saving it for that launch (tests, CI, kiosk benches).
 
 ### Flashing
 
@@ -211,7 +235,7 @@ uv run esp-prog2-flasher --flash-psoc6      # flash the PSoC 6 with the bundled 
 uv run esp-prog2-flasher --flash-psoc6 --hex path/to/psoc6.hex
 
 uv run esp-prog2-flasher --flash-probe       # flash the bundled SWD firmware (needs download mode)
-uv run esp-prog2-flasher --flash-probe --port COM110
+uv run esp-prog2-flasher --flash-probe --port COM110   # required when only a download-mode port is present
 uv run esp-prog2-flasher --flash-probe --probe-bin path/to/other.bin
 uv run esp-prog2-flasher --update-probe-fw   # fetch official JTAG image as esp-prog2-official-jtag.bin (reference)
 
@@ -222,6 +246,14 @@ uv run esp-prog2-flasher --flash-solo idu --port COM7 --bundle path/to/bundle   
 ```
 
 `--freq <hz>` overrides the SWD clock for target flashing (default 1 MHz).
+`--no-state` (TUI only) skips loading and saving the [saved state](#saved-state).
+`--flash-probe` without `--port` only auto-detects the running bridge
+(`303A:1002`). Every ESP32-S3 on USB-Serial-JTAG, a SOLO board included, shows
+up as `303A:1001`, which may be the ESP-Prog-2 in download mode or a SOLO board,
+so when only such ports exist it exits `2`, lists them and asks for `--port`.
+`--list` labels them `ESP32-S3 download mode — ESP-Prog-2 or a SOLO board`. The
+TUI's probe flash likewise makes you pick the port from the list (nothing is
+preselected) and the header never calls a `303A:1001` port the ESP-Prog-2.
 `--detect` exit codes: `0` target/probe OK, `2` no probe found.
 
 `--product DEVICE` writes the device config block alongside the bootloader flash.
@@ -286,7 +318,11 @@ uv run esp-prog2-flasher --read-node-config --port COM7
   valid table without a `cancfg` partition is an error, because the node
   firmware would never read a block written anywhere else.
 - `--read-node-config` prints the manufacturer, product and CAN IDs, or
-  `unprovisioned/invalid (node uses defaults 0x79E/0x79F)`.
+  `unprovisioned/invalid (node uses defaults 0x79E/0x79F)`. It also reads the
+  24-byte board-profile record at `cancfg + 0x50` in the same flash read and prints
+  `Board profile: TWAI tx GPIO4 rx GPIO5, 250 kbit/s, hold-LOW mask 0x0`, or
+  `Board profile: no board profile (updater defaults: TWAI tx GPIO4 rx GPIO5, 250 kbit/s, hold-LOW mask 0x0)`
+  when the record is absent or invalid. The TUI's `/ r` shows the same.
 
 ## SOLO boards (ESP32-S3)
 

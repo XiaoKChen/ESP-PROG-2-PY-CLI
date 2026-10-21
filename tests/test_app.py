@@ -12,7 +12,9 @@ Covers:       mounting at 80x24 and 120x40 with every panel and every target's d
               --read-node-config; the RA4M1 bootloader wizard with a known and a custom device;
               shift+tab and "/" typed into a field; the browser's filter and pick; a finished
               run's Recent row and status; the help table built from the command table; the
-              busy guard; ctrl+c; the terminal theme choice.
+              busy guard; ctrl+c; the terminal theme choice; the saved state (restore on launch,
+              saves as things change, a Recent row and recent files surviving a restart, corrupt,
+              newer and vanished-path handling, the forget command and no_state).
 Not covered:  the flasher calls themselves (tests/test_flasher.py, tests/test_psoc6.py), the
               Windows drive list, spinner animation and exact colours.
 See also:     src/esp_prog2_flasher/app.py, src/esp_prog2_flasher/tui/
@@ -23,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -33,6 +37,7 @@ from esp_prog2_flasher.app import FlasherApp
 from esp_prog2_flasher.board_profile import SOLO_PROFILES
 from esp_prog2_flasher.dfu_config import DEFAULT_MANUFACTURER, DEVICE_CAN_IDS, DfuConfig
 from esp_prog2_flasher.flasher import DetectResult, TargetState
+from esp_prog2_flasher.tui import state
 from esp_prog2_flasher.tui.browser import BrowserScreen
 from esp_prog2_flasher.tui.commands import (
     BROWSER_COMMANDS,
@@ -40,7 +45,9 @@ from esp_prog2_flasher.tui.commands import (
     GLOBAL_COMMANDS,
     help_rows,
 )
+from esp_prog2_flasher.tui.flows import Settings
 from esp_prog2_flasher.tui.screens import CommandPopup, DashboardScreen, HelpScreen, RunScreen
+from esp_prog2_flasher.tui.targets import SOLO_TARGETS, RecentRun
 from esp_prog2_flasher.tui.theme import DARK_THEME_NAME, LIGHT_THEME_NAME, theme_name_for_terminal
 from esp_prog2_flasher.tui.widgets import DetailsView, FilterList, StatusLine
 from esp_prog2_flasher.tui.wizard import ChoiceStep, TextStep, WizardScreen
@@ -52,7 +59,15 @@ PORTS = [
     flasher.SerialPortInfo(BRIDGE_PORT, "USB Serial", flasher.ESP_PROG_VID, flasher.ESP_PROG_PID),
     flasher.SerialPortInfo(SOLO_PORT, "USB Serial", flasher.ESP_PROG_VID, 0x1001),
 ]
-COMMAND_LETTERS = "dfepbamnrglq"
+COMMAND_LETTERS = "dfepbamnrglcq"
+
+
+@pytest.fixture(autouse=True)
+def hermetic_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point the default state file into tmp_path so no test touches the user's config dir."""
+    path = tmp_path / "default-config" / "state.json"
+    monkeypatch.setattr(state, "default_state_path", lambda: path)
+    return path
 
 
 @pytest.fixture(autouse=True)
@@ -187,7 +202,7 @@ def test_popup_lists_only_the_selection_commands_and_runs_one() -> None:
         popup = app.screen
         assert isinstance(popup, CommandPopup)
         keys = [command.key for command in popup.commands]
-        assert keys == ["e", "p", "b", "a", "m", "n", "r", "l", "?", "q"]
+        assert keys == ["e", "p", "b", "a", "m", "n", "r", "l", "c", "?", "q"]
         assert "toggle migrate-stock" in [c.description for c in popup.commands]
         await pilot.press("m")
         assert isinstance(app.screen, DashboardScreen)
@@ -314,9 +329,9 @@ def test_solo_read_config_runs_without_a_confirm(
 ) -> None:
     ports: list[str] = []
 
-    def fake_read(port: str, **_: object) -> DfuConfig | None:
+    def fake_read(port: str, **_: object) -> flasher.NodeConfig:
         ports.append(port)
-        return config
+        return flasher.NodeConfig(config, None)
 
     monkeypatch.setattr(flasher, "read_node_config", fake_read)
 
@@ -539,3 +554,173 @@ def test_detect_on_the_psoc6_row_uses_the_psoc6_target(monkeypatch: pytest.Monke
 )
 def test_theme_follows_the_terminal_background(colorfgbg: str, theme: str) -> None:
     assert theme_name_for_terminal({"COLORFGBG": colorfgbg}) == theme
+
+
+# ----- saved state (issue #19) -----------------------------------------------------------
+
+
+def launch(state_file: Path, test: AppTest) -> None:
+    run_app(test, app=FlasherApp(state_path=state_file))
+
+
+def save(state_file: Path, **overrides: object) -> None:
+    base = state.SavedState(Settings(), (), None, ())
+    state.save_state(state_file, replace(base, **overrides))  # type: ignore[arg-type]
+
+
+def test_settings_selection_and_folds_are_restored_on_launch(tmp_path: Path) -> None:
+    state_file = tmp_path / "state.json"
+    settings = replace(Settings(), solo_port=SOLO_PORT, solo_tag="v9", solo_migrate=True)
+    save(state_file, settings=settings, selected="t:solo:SOLO IDU Controller", collapsed=("psoc6",))
+
+    async def check(app: FlasherApp, pilot: Pilot[None]) -> None:
+        assert app.settings.solo_port == SOLO_PORT and app.settings.solo_migrate
+        assert app.settings.solo_tag == "v9"
+        keys = [row.key for row in target_list(app).rows]
+        assert "g:psoc6" in keys and "t:psoc6:" not in keys
+        assert "t:boot:" in keys
+        selected = target_list(app).selected
+        assert selected is not None and selected.key == "t:solo:SOLO IDU Controller"
+
+    launch(state_file, check)
+
+
+def test_an_edit_and_folding_are_saved_as_they_happen(tmp_path: Path) -> None:
+    state_file = tmp_path / "state.json"
+
+    async def check(app: FlasherApp, pilot: Pilot[None]) -> None:
+        await type_text(pilot, "solo odu")
+        await pilot.press("slash", "m")
+        saved = state.load_state(state_file).state
+        assert saved is not None and saved.settings.solo_migrate
+        await pilot.press("escape", "home", "enter")  # fold the first group
+        saved = state.load_state(state_file).state
+        assert saved is not None and saved.collapsed == ("ra4m1",)
+        assert saved.selected == "g:ra4m1"
+
+    launch(state_file, check)
+
+
+def test_a_recent_run_survives_a_restart_and_reruns_through_the_confirm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_file = tmp_path / "state.json"
+    node = flasher.NodeConfig(None, None)
+    monkeypatch.setattr(flasher, "read_node_config", lambda *_a, **_k: node)
+
+    async def first(app: FlasherApp, pilot: Pilot[None]) -> None:
+        await type_text(pilot, "solo odu")
+        await pilot.press("slash", "r")
+        await type_text(pilot, SOLO_PORT.lower())
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert [r.operation for r in app.recents] == ["read"]
+
+    launch(state_file, first)
+
+    async def second(app: FlasherApp, pilot: Pilot[None]) -> None:
+        assert [(r.operation, r.detail) for r in app.recents] == [("read", f"{SOLO_PORT} · read")]
+        recent_rows = [row for row in target_list(app).rows if row.key.startswith("r:")]
+        assert len(recent_rows) == 1
+        assert app.recents[0].at <= datetime.now()
+        target_list(app).select_key(recent_rows[0].key)
+        await pilot.press("enter")
+        assert isinstance(app.screen, WizardScreen)
+        assert wizard(app).step is not None and wizard(app).step.key == "port"
+
+    launch(state_file, second)
+
+
+def test_recent_files_head_the_browser_and_missing_ones_are_dropped(tmp_path: Path) -> None:
+    state_file = tmp_path / "state.json"
+    image = tmp_path / "picked.hex"
+    image.write_text(":00000001FF\n", encoding="utf-8")
+    settings = replace(Settings(), recent_hex=(str(tmp_path / "gone.hex"), str(image)))
+    save(state_file, settings=settings)
+
+    async def check(app: FlasherApp, pilot: Pilot[None]) -> None:
+        await type_text(pilot, "bootloader")
+        await pilot.press("slash", "f")
+        assert isinstance(app.screen, BrowserScreen)
+        keys = [row.key for row in app.screen.entry_list.rows]
+        assert keys[:2] == ["header:recent", f"recent:{image}"]
+        assert not any("gone.hex" in key for key in keys)
+        await type_text(pilot, "picked")
+        assert [row.key for row in app.screen.entry_list.rows][-1] == f"recent:{image}"
+        await pilot.press("enter")
+        assert isinstance(app.screen, DashboardScreen)
+        assert app.settings.boot_hex == str(image)
+        assert app.settings.recent_hex[0] == str(image)
+
+    launch(state_file, check)
+
+
+def test_a_corrupt_state_file_starts_with_defaults_and_is_replaced(tmp_path: Path) -> None:
+    state_file = tmp_path / "state.json"
+    state_file.write_text("{not json", encoding="utf-8")
+
+    async def check(app: FlasherApp, pilot: Pilot[None]) -> None:
+        assert status_text(app).startswith("! Saved state unreadable")
+        assert app.settings == FlasherApp(no_state=True).settings
+        await type_text(pilot, "solo odu")
+        await pilot.press("slash", "m")
+        assert state.load_state(state_file).state is not None
+
+    launch(state_file, check)
+
+
+def test_a_newer_state_file_is_ignored_and_left_untouched(tmp_path: Path) -> None:
+    state_file = tmp_path / "state.json"
+    newer = '{"version": 99, "future": true}'
+    state_file.write_text(newer, encoding="utf-8")
+
+    async def check(app: FlasherApp, pilot: Pilot[None]) -> None:
+        assert "newer version" in status_text(app)
+        await type_text(pilot, "solo odu")
+        await pilot.press("slash", "m")
+        assert app.settings.solo_migrate
+        assert state_file.read_text(encoding="utf-8") == newer
+
+    launch(state_file, check)
+
+
+def test_a_vanished_saved_path_falls_back_with_one_status(tmp_path: Path) -> None:
+    state_file = tmp_path / "state.json"
+    save(state_file, settings=replace(Settings(), app_bin=str(tmp_path / "gone.bin")))
+
+    async def check(app: FlasherApp, pilot: Pilot[None]) -> None:
+        assert app.settings.app_bin == ""
+        assert status_text(app).startswith("! Saved path no longer exists")
+        assert "application .bin" in status_text(app)
+
+    launch(state_file, check)
+
+
+def test_the_forget_command_deletes_the_file_and_resets_the_session(tmp_path: Path) -> None:
+    state_file = tmp_path / "state.json"
+    run = RecentRun(1, SOLO_TARGETS[0], "read", "COM9", True, "ok", datetime.now())
+    save(state_file, settings=replace(Settings(), solo_port="COM9"), recents=(run,))
+
+    async def check(app: FlasherApp, pilot: Pilot[None]) -> None:
+        assert app.settings.solo_port == "COM9" and len(app.recents) == 1
+        await pilot.press("slash", "c")
+        assert not state_file.exists()
+        assert app.settings.solo_port == "" and not app.recents
+        assert "Saved state forgotten" in status_text(app)
+
+    launch(state_file, check)
+
+
+def test_no_state_neither_loads_nor_saves(hermetic_state: Path) -> None:
+    save(hermetic_state, settings=replace(Settings(), solo_port="COM9"))
+    before = hermetic_state.read_text(encoding="utf-8")
+
+    async def check(app: FlasherApp, pilot: Pilot[None]) -> None:
+        assert app.settings.solo_port == ""
+        await type_text(pilot, "solo odu")
+        await pilot.press("slash", "m")
+        await pilot.press("slash", "c")
+        assert "--no-state" in status_text(app)
+
+    run_app(check, app=FlasherApp(no_state=True))
+    assert hermetic_state.read_text(encoding="utf-8") == before

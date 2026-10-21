@@ -30,6 +30,7 @@ from esp_prog2_flasher.board_profile import (
     InvalidProfileError,
     ProfileRecord,
     build_cancfg_image,
+    describe_read_profile,
     encode_profile_record,
     parse_profile_record,
 )
@@ -202,3 +203,14 @@ def _bad_crc() -> bytes:
 )
 def test_invalid_record_decodes_to_none(data: bytes) -> None:
     assert parse_profile_record(data) is None
+
+
+def test_read_profile_text_names_pins_bitrate_and_mask() -> None:
+    record = ProfileRecord(6, 7, Bitrate.MBPS_1, 0b101000)
+    assert describe_read_profile(record) == ("TWAI tx GPIO6 rx GPIO7, 1 Mbit/s, hold-LOW mask 0x28")
+
+
+def test_read_profile_text_without_a_record_names_the_updater_defaults() -> None:
+    assert describe_read_profile(None) == (
+        "no board profile (updater defaults: TWAI tx GPIO4 rx GPIO5, 250 kbit/s, hold-LOW mask 0x0)"
+    )

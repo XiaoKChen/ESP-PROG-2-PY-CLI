@@ -18,7 +18,7 @@ See also:    ../app.py, wizard.py, browser.py, tests/test_app.py
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from datetime import datetime
 from typing import ClassVar, Final, Protocol, TypeVar
 
@@ -57,6 +57,8 @@ from .widgets import (
 )
 
 ResultT = TypeVar("ResultT")
+_TARGET_KEY_PREFIX: Final[str] = "t:"
+_GROUP_KEY_PREFIX: Final[str] = "g:"
 
 MIN_DETAILS_WIDTH: Final[int] = 80  # narrower terminals hide the details pane
 # Screens with a details pane add "-narrow" below MIN_DETAILS_WIDTH columns and hide it.
@@ -202,6 +204,8 @@ class DashboardHost(Protocol):
 
     def run_command(self, command: Command, target: Target | None) -> None: ...
 
+    def view_changed(self) -> None: ...
+
 
 Selection = TargetGroup | Target | RecentRun
 
@@ -218,10 +222,17 @@ class DashboardScreen(ChromeScreen[None]):
     }
     """
 
-    def __init__(self, chrome: ChromeState, host: DashboardHost) -> None:
+    def __init__(
+        self,
+        chrome: ChromeState,
+        host: DashboardHost,
+        collapsed: Collection[str] = (),
+        selected: str | None = None,
+    ) -> None:
         super().__init__(chrome)
         self.host = host
-        self._collapsed: set[str] = set()
+        self._collapsed: set[str] = {g.id for g in TARGET_GROUPS if g.id in collapsed}
+        self._initial_selected = selected
         self._objects: dict[str, Selection] = {}
         self._mounted = False
 
@@ -240,9 +251,30 @@ class DashboardScreen(ChromeScreen[None]):
         self.query_one("#details").border_title = "Details"
         self._mounted = True
         self.rebuild()
+        if self._initial_selected is not None:
+            self.target_list.select_key(self._initial_selected)
+            self._show_details()
         self.set_interval(_RELATIVE_TIME_REFRESH_S, self.rebuild)
 
     def on_screen_resume(self) -> None:
+        self.rebuild()
+
+    @property
+    def view_state(self) -> tuple[str | None, tuple[str, ...]]:
+        """What to restore next launch: the selected target or group key, and the folded groups."""
+        if not self._mounted:
+            return self._initial_selected, tuple(
+                g.id for g in TARGET_GROUPS if g.id in self._collapsed
+            )
+        row = self.target_list.selected
+        key = (
+            row.key if row and row.key.startswith((_TARGET_KEY_PREFIX, _GROUP_KEY_PREFIX)) else None
+        )
+        return key, tuple(g.id for g in TARGET_GROUPS if g.id in self._collapsed)
+
+    def reset_view(self) -> None:
+        """Unfold every group."""
+        self._collapsed.clear()
         self.rebuild()
 
     @property
@@ -390,6 +422,7 @@ class DashboardScreen(ChromeScreen[None]):
         if isinstance(selection, TargetGroup):
             self._collapsed ^= {selection.id}
             self.rebuild()
+            self.host.view_changed()
         elif isinstance(selection, Target):
             self.host.run_primary(selection)
         elif isinstance(selection, RecentRun):
@@ -403,6 +436,7 @@ class DashboardScreen(ChromeScreen[None]):
             else:
                 self._collapsed.add(selection.id)
             self.rebuild()
+            self.host.view_changed()
         elif isinstance(selection, Target) and not expand:
             group = next(g for g in TARGET_GROUPS if selection in g.targets)
             self.target_list.select_key(f"g:{group.id}")
