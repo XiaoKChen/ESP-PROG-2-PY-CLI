@@ -9,4 +9,4 @@ Not here:    flashing logic (flasher.py), CLI parsing (cli.py), the TUI (app.py)
 Depends on:  nothing.
 """
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
