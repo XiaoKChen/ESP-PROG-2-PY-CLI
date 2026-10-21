@@ -5,7 +5,7 @@
 - **PACKAGE_MANAGER:** uv (uv_build backend; committed `uv.lock`)
 - **KEY_DEPENDENCIES:** esptool>=5.3.0, pyocd>=0.44.1, pyserial>=3.5, textual>=8.2.7, truststore>=0.10.4
 - **LINT:** ruff (line-length 100, target py312; rules E/W/F/I/B/UP/SIM)
-- **TYPECHECK:** mypy (strict, warn_unreachable)
+- **TYPECHECK:** mypy (strict, warn_unreachable; `ignore_missing_imports` override only for the stub-less `esptool`, `intelhex`, `pyocd.*`, `serial.*`) — clean, 0 errors
 - **TEST:** pytest (testpaths=["tests"], addopts="-q")
 - **ENTRY_POINTS:** `esp-prog2-flasher = "esp_prog2_flasher.cli:main"` (`[project.scripts]`)
 - **SOURCE:** `src/esp_prog2_flasher/`
