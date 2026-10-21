@@ -1,6 +1,6 @@
 # ESP-Prog-2 Flasher
 
-A `uv`-run Python **TUI/CLI** (v3.0.0) for flashing Normal Corporation's boards. A
+A `uv`-run Python **TUI/CLI** (v3.1.0) for flashing Normal Corporation's boards. A
 keyboard-driven dashboard (or headless flags) covers four jobs:
 
 ![ESP-Prog-2 Flasher dashboard: filter, "/" commands, SOLO flash wizard, run view](docs/images/tui-demo.gif)
@@ -425,7 +425,7 @@ ESP-PROG-2-PY-CLI/
 │   ├── dfu_config.py  # encode the device config block (DFU names + boot CAN IDs)
 │   ├── board_profile.py  # ESP32-S3 board-profile record, cancfg image, SOLO presets
 │   ├── app.py         # Textual TUI: session state, "/" commands, flasher jobs
-│   ├── tui/           # TUI: theme, dashboard, "/" popup, wizards, file browser
+│   ├── tui/           # TUI: theme, dashboard, "/" popup, wizards, file browser, saved state
 │   ├── cli.py         # argparse entry point (TUI by default)
 │   └── __main__.py    # `python -m esp_prog2_flasher`
 ├── hex/             # bundled dfu_minima.hex (RA4M1 bootloader) + psoc6_radar_full_image.hex; override with --hex
@@ -435,7 +435,7 @@ ESP-PROG-2-PY-CLI/
 ├── scripts/         # build.* (PyInstaller), install.* (release installers), run-termux.sh
 ├── tests/           # pytest suite
 ├── docs/images/     # README screenshots + demo GIF
-├── esp-prog2-flasher.spec   # PyInstaller spec (bundles hex/ + firmware/)
+├── esp-prog2-flasher.spec   # PyInstaller spec (bundles hex/, packs/, firmware/)
 └── pyproject.toml
 ```
 
