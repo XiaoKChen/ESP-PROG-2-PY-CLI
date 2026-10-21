@@ -98,6 +98,7 @@ class FlasherApp(App[None]):
         self._detect: DetectResult | None = None
         self._psoc6_detect: DetectResult | None = None
         self._serial: flasher.ProbeSerial | None = None
+        self._download_candidates: list[flasher.SerialPortInfo] = []
         self._recents: list[RecentRun] = []
         self._run_ids = itertools.count(1)
         self._log_lines: list[str] = []
@@ -314,21 +315,8 @@ class FlasherApp(App[None]):
         if firmware is None:
             self._post_status("err", "No esp-prog2.bin found. Get the official image with / g.")
             return
-        serial = flasher.find_probe_serial()
-        if serial is None:
-            self._post_status(
-                "warn",
-                "No ESP-Prog-2 serial port found. Plug it in and enter download mode "
-                "(hold BOOT, tap RESET).",
-            )
-            return
-        if not serial.in_download_mode:
-            self._write_log(
-                f"[yellow]{escape(serial.device)} looks like the running bridge (not download "
-                "mode). If flashing fails, hold BOOT + tap RESET, then retry.[/yellow]"
-            )
-        job = flows.ProbeFlashJob(firmware, serial.device, serial.in_download_mode)
-        self._run_flow(flows.probe_flash_flow(self._settings, job), target, "flash")
+        ports = flasher.list_serial_ports()
+        self._run_flow(flows.probe_flash_flow(self._settings, firmware, ports), target, "flash")
 
     def _run_flow(self, flow: flows.JobFlow, target: Target, operation: Operation) -> None:
         """Walk the flow's wizard; on its final answer, keep the settings and start the job."""
@@ -402,6 +390,11 @@ class FlasherApp(App[None]):
                 self._begin_job(target, operation, f"{job.port} · read", title, label)
                 self.read_solo_config_worker(job.port)
             case flows.ProbeFlashJob():
+                if not job.in_download_mode:
+                    self._write_log(
+                        f"[yellow]{escape(job.port)} is the running bridge (not download mode). "
+                        "If flashing fails, hold BOOT + tap RESET, then retry.[/yellow]"
+                    )
                 label = f"Flashing ESP-Prog-2 {job.firmware.name} via {job.port}"
                 self._begin_job(target, operation, job.port, title, label)
                 self.flash_probe_worker(job.firmware, job.port)
@@ -625,13 +618,23 @@ class FlasherApp(App[None]):
         return f"{chip} {_DETECT_TEXT[result.state][1]}"
 
     def _serial_text(self) -> str:
-        if self._serial is None:
-            return "no ESP-Prog-2 port"
-        mode = "download mode" if self._serial.in_download_mode else "bridge running"
-        return f"{self._serial.device} ({mode})"
+        if self._serial is not None:
+            return f"{self._serial.device} (bridge running)"
+        if self._download_candidates:
+            ports = ", ".join(port.device for port in self._download_candidates)
+            return f"{ports} (ESP32-S3 download mode: ESP-Prog-2 or SOLO board)"
+        return "no ESP-Prog-2 port"
+
+    def _serial_header_text(self) -> str:
+        if self._serial is not None:
+            return self._serial.device
+        if self._download_candidates:
+            return f"{len(self._download_candidates)} ESP32-S3 port(s)"
+        return "no serial port"
 
     def _refresh_serial(self) -> None:
         self._serial = flasher.find_probe_serial()
+        self._download_candidates = flasher.find_download_mode_candidates()
         self._refresh_chrome()
 
     def _header_items(self) -> list[tuple[StatusLevel | None, str]]:
@@ -646,8 +649,7 @@ class FlasherApp(App[None]):
             info = self._detect.probe
             probe = ("ok", f"probe {info.description or info.product_name}")
             target = _HEADER_TARGET[self._detect.state]
-        serial = self._serial.device if self._serial else "no serial port"
-        return [probe, (None, serial), target]
+        return [probe, (None, self._serial_header_text()), target]
 
     def _refresh_chrome(self) -> None:
         self._chrome.header_items = self._header_items()

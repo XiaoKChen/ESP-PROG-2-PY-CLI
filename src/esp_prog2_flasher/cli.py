@@ -15,7 +15,9 @@ Not here:    the flashing engine and the SOLO bundle (flasher.py), the TUI (app.
 Invariants:  the node flags and --flash-solo never auto-detect a port — auto-detect finds the
              ESP-Prog-2, not the board — so --port is mandatory for them. A SOLO preset's CAN
              ID pair is fixed, so --boot-cmd-id/--boot-reply-id and --product are rejected
-             with --flash-solo.
+             with --flash-solo. --flash-probe without --port only takes the running bridge: when
+             just 303A:1001 ports exist (ESP-Prog-2 in download mode or a SOLO board) it lists
+             them and exits 2.
 Errors:      invalid or conflicting arguments exit with code 2; a failed flash, download, bundle
              fetch or node read logs the exception, prints to stderr and exits with code 1; --detect
              exits 2 only when no probe is found, otherwise 0; --read-node-config exits 0 for
@@ -53,6 +55,7 @@ SOLO_BOARDS: Final[dict[str, str]] = {"odu": "SOLO ODU Controller", "idu": "SOLO
 # What --flash-solo holds when given without a board: prompt for one. Not a str, so
 # argparse neither type-converts nor choice-checks it.
 _ASK_FOR_BOARD: Final = object()
+DOWNLOAD_MODE_LABEL: Final[str] = "ESP32-S3 download mode — ESP-Prog-2 or a SOLO board"
 
 
 def _can_id(text: str) -> int:
@@ -367,6 +370,26 @@ def _read_node_config(port: str) -> None:
     )
 
 
+def _probe_port_or_exit() -> str:
+    """Return the running bridge's port; exit 2 when only ambiguous (or no) ports exist."""
+    probe_serial = flasher.find_probe_serial()
+    if probe_serial:
+        return probe_serial.device
+    candidates = flasher.find_download_mode_candidates()
+    if not candidates:
+        print("No ESP-Prog-2 serial port found. Plug it in, or pass --port.", file=sys.stderr)
+        sys.exit(2)
+    print(
+        "Refusing to guess the ESP-Prog-2 port: only ESP32-S3 download-mode ports were found, "
+        "and a SOLO board looks the same:",
+        file=sys.stderr,
+    )
+    for candidate in candidates:
+        print(f"  {candidate.device}  {DOWNLOAD_MODE_LABEL}", file=sys.stderr)
+    print("Pass --port <port> to choose the ESP-Prog-2.", file=sys.stderr)
+    sys.exit(2)
+
+
 def _resolve_dfu_config(
     manufacturer: str,
     product: str | None,
@@ -489,10 +512,12 @@ def main() -> None:
         else:
             print("probe   none connected")
         serial = flasher.find_probe_serial()
+        candidates = flasher.find_download_mode_candidates()
         if serial:
-            mode = "download mode" if serial.in_download_mode else "bridge running"
-            print(f"serial  {serial.device}\tpid 0x{serial.pid:04X} ({mode})")
-        else:
+            print(f"serial  {serial.device}\tpid 0x{serial.pid:04X} (ESP-Prog-2 bridge running)")
+        for candidate in candidates:
+            print(f"serial  {candidate.device}\tpid 0x{candidate.pid:04X} ({DOWNLOAD_MODE_LABEL})")
+        if not serial and not candidates:
             print("serial  none connected")
         return
 
@@ -544,10 +569,7 @@ def main() -> None:
         if fw is None:
             print("No esp-prog2.bin found. Run --update-probe-fw first.", file=sys.stderr)
             sys.exit(2)
-        port = args.port
-        if not port:
-            probe_serial = flasher.find_probe_serial()
-            port = probe_serial.device if probe_serial else None
+        port = args.port or _probe_port_or_exit()
         try:
             flasher.flash_probe(fw, port=port, log=print)
         except Exception as exc:  # noqa: BLE001

@@ -9,8 +9,9 @@ Embedded-CAN-Bootloaders release bundle: bootloader, partition table, otadata, C
 the board's cancfg image, optionally plus an app in ota_0. It has no Textual dependency, so the
 same logic backs both the TUI and the headless CLI.
 
-Owns:        probe VID/PID and target-type names, APP_BASE_ADDRESS, the PSoC 6 flash and
-             metadata address ranges, bundled-asset lookup (hex/, packs/, firmware/),
+Owns:        probe VID/PID and target-type names, the serial-port classification (running
+             bridge = unambiguous, 303A:1001 = candidate only), APP_BASE_ADDRESS, the PSoC 6
+             flash and metadata address ranges, bundled-asset lookup (hex/, packs/, firmware/),
              ESPTOOL_SHIM_FLAG (the frozen-build esptool re-exec flag dispatched by cli.py),
              and the node's partition-table offset/entry format, the cancfg partition identity
              and its fallback offset; the SOLO release bundle (repo, default tag, asset pattern,
@@ -82,6 +83,8 @@ logger = logging.getLogger(__name__)
 # The ESP-Prog-2 enumerates as a CMSIS-DAP device on Espressif's USB vendor ID.
 ESP_PROG_VID: Final[int] = 0x303A
 ESP_PROG_PID: Final[int] = 0x1002
+# Every ESP32-S3 on USB-Serial-JTAG (ESP-Prog-2 in ROM download mode, SOLO boards) uses this.
+ESP32S3_USB_JTAG_PID: Final[int] = 0x1001
 # Renesas RA4M1 (Arduino UNO R4 Minima MCU) — pyOCD pack target name.
 TARGET_TYPE: Final[str] = "r7fa4m1ab"
 # Infineon PSoC 6 (CY8C6245 / PSoC 62S3) — built into pyOCD, no CMSIS pack needed.
@@ -682,31 +685,15 @@ _OFFICIAL_BIN_NAME = "esp-prog2-official-jtag.bin"
 
 @dataclass(frozen=True)
 class ProbeSerial:
+    """The running ESP-Prog-2 bridge's serial port (the only unambiguous identification)."""
+
     device: str
     pid: int
-
-    @property
-    def in_download_mode(self) -> bool:
-        # The running bridge firmware exposes PID 0x1002 (its CDC bridge to the
-        # target). ROM download mode re-enumerates with a different PID.
-        return self.pid != ESP_PROG_PID
 
 
 def find_probe_firmware() -> Path | None:
     """Locate the bundled firmware/esp-prog2.bin regardless of launch directory."""
     return _find_bundled("firmware", _PROBE_BIN_NAME)
-
-
-def find_probe_serial() -> ProbeSerial | None:
-    """Find the ESP-Prog-2's serial port; prefer a ROM-download-mode port if present."""
-    from serial.tools import list_ports
-
-    esp = [p for p in list_ports.comports() if p.vid == ESP_PROG_VID]
-    if not esp:
-        return None
-    download = [p for p in esp if p.pid not in (None, ESP_PROG_PID)]
-    chosen = (download or esp)[0]
-    return ProbeSerial(chosen.device, chosen.pid or 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -724,6 +711,11 @@ class SerialPortInfo:
         # enumerates as 303A:1001, the same as any ESP32-S3 board on USB-Serial-JTAG.
         return self.vid == ESP_PROG_VID and self.pid == ESP_PROG_PID
 
+    @property
+    def is_download_mode_candidate(self) -> bool:
+        """An ESP32-S3 on USB-Serial-JTAG: the ESP-Prog-2 in download mode OR a SOLO board."""
+        return self.vid == ESP_PROG_VID and self.pid == ESP32S3_USB_JTAG_PID
+
 
 def list_serial_ports() -> list[SerialPortInfo]:
     """List every serial port, sorted by device name, for picking a SOLO board's port."""
@@ -731,6 +723,19 @@ def list_serial_ports() -> list[SerialPortInfo]:
 
     ports = (SerialPortInfo(p.device, p.description, p.vid, p.pid) for p in list_ports.comports())
     return sorted(ports, key=lambda port: port.device)
+
+
+def find_probe_serial() -> ProbeSerial | None:
+    """Find the running ESP-Prog-2 bridge's port; never guesses from a 303A:1001 port."""
+    for port in list_serial_ports():
+        if port.is_esp_prog_bridge:
+            return ProbeSerial(port.device, ESP_PROG_PID)
+    return None
+
+
+def find_download_mode_candidates() -> list[SerialPortInfo]:
+    """List the 303A:1001 ports: each is the ESP-Prog-2 in download mode or a SOLO board."""
+    return [port for port in list_serial_ports() if port.is_download_mode_candidate]
 
 
 def download_probe_firmware(dest: Path | None = None, log: LogCallback | None = None) -> Path:

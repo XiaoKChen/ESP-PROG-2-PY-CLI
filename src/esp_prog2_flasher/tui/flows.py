@@ -56,7 +56,6 @@ NO_APP: Final[str] = "\x00none"
 # (vs. the 16 KiB C bootloader's flasher.APP_BASE_ADDRESS == 0x4000).
 EMBASSY_APP_BASE_ADDRESS: Final[int] = 0x8000
 # ESP32-S3 USB-Serial-JTAG / ROM download PID: a SOLO board, or an ESP-Prog-2 in download mode.
-_ESP32S3_USB_JTAG_PID: Final[int] = 0x1001
 _BITRATE_LABELS: Final[dict[Bitrate, str]] = {
     Bitrate.KBPS_125: "125 kbit/s",
     Bitrate.KBPS_250: "250 kbit/s",
@@ -202,7 +201,7 @@ def port_label(port: flasher.SerialPortInfo) -> str:
     """Name a serial port by what it is when its USB ID says so, else by its OS description."""
     if port.is_esp_prog_bridge:
         return "ESP-Prog-2 bridge (not a SOLO board)"
-    if port.vid == flasher.ESP_PROG_VID and port.pid == _ESP32S3_USB_JTAG_PID:
+    if port.is_download_mode_candidate:
         return "ESP32-S3 USB (SOLO board, or ESP-Prog-2 in download mode)"
     return port.description
 
@@ -301,18 +300,17 @@ def _device_steps(settings: Settings, answers: Answers) -> list[Step]:
 
 
 def _port_steps(
-    settings: Settings, ports: Sequence[flasher.SerialPortInfo], answers: Answers
+    settings: Settings,
+    ports: Sequence[flasher.SerialPortInfo],
+    answers: Answers,
+    label: str = "Board port (the board's own USB port)",
 ) -> list[Step]:
     # The ESP-Prog-2's bridge is never the board: list it last so the cursor never starts on it.
     ordered = sorted(ports, key=lambda port: port.is_esp_prog_bridge)
     choices = [Choice(port.device, port.device, port_label(port)) for port in ordered]
     note = "not in the list" if ports else "no serial ports detected"
     choices.append(Choice(TYPE_PORT, "Type a port…", note))
-    steps: list[Step] = [
-        ChoiceStep(
-            "port", "Board port (the board's own USB port)", tuple(choices), settings.solo_port
-        )
-    ]
+    steps: list[Step] = [ChoiceStep("port", label, tuple(choices), settings.solo_port)]
     if answers.get("port") == TYPE_PORT:
         steps.append(
             TextStep(
@@ -545,12 +543,23 @@ def solo_read_flow(
     )
 
 
-def probe_flash_flow(settings: Settings, job: ProbeFlashJob) -> JobFlow:
+def probe_flash_flow(
+    settings: Settings, firmware: Path, ports: Sequence[flasher.SerialPortInfo]
+) -> JobFlow:
+    # A 303A:1001 port may be a SOLO board, so the user always picks the port and nothing
+    # (not even the SOLO port setting) is preselected.
+    unselected = replace(settings, solo_port="")
+    bridges = {port.device for port in ports if port.is_esp_prog_bridge}
+
+    def resolve(answers: Answers) -> tuple[Settings, Job]:
+        port = _with_port(unselected, answers).solo_port
+        return settings, ProbeFlashJob(firmware, port, port not in bridges)
+
     return _job_flow(
         "Flash the ESP-Prog-2 firmware",
         f"ESP-Prog-2 ({flasher.PROBE_CHIP}) via esptool",
-        lambda _answers: [],
-        lambda _answers: (settings, job),
+        lambda answers: _port_steps(unselected, ports, answers, "ESP-Prog-2 port"),
+        resolve,
     )
 
 
