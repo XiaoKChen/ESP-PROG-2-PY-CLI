@@ -271,9 +271,10 @@ def _raw_probes(unique_id: str | None = None) -> list[DebugProbe]:
     # Imported lazily so module import never blocks on USB enumeration.
     from pyocd.core.helpers import ConnectHelper
 
-    return ConnectHelper.get_all_connected_probes(
+    probes: list[DebugProbe] = ConnectHelper.get_all_connected_probes(
         blocking=False, unique_id=unique_id, print_wait_message=False
     )
+    return probes
 
 
 def _choose_raw(unique_id: str | None = None) -> DebugProbe | None:

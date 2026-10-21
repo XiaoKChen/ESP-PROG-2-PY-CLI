@@ -49,6 +49,11 @@ select = [
 strict = true
 warn_unreachable = true
 
+# These libraries ship neither inline types nor stub packages.
+[[tool.mypy.overrides]]
+module = ["esptool", "intelhex", "pyocd.*", "serial.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
