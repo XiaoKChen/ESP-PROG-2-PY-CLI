@@ -3,7 +3,8 @@
 Flashing the **target board** (the RA4M1 / UNO R4 Minima) is done with **pyOCD**
 over the ESP-Prog-2's CMSIS-DAP interface. Everything pyOCD needs is a Python
 dependency of this project (`uv add pyocd` already pinned it), plus the Renesas
-device support pack.
+device support pack. The PSoC 6 target (`cy8c6xx5`) is built into pyOCD and
+needs no pack.
 
 ## Requirements
 

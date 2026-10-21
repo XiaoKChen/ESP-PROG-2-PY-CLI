@@ -1,8 +1,9 @@
 # ESP-Prog-2 Flasher
 
-A `uv`-run Python **TUI/CLI** for the **ESP-Prog-2** debug probe. It does three jobs:
+A `uv`-run Python **TUI/CLI** (v3.0.0) for flashing Normal Corporation's boards. A
+keyboard-driven dashboard (or headless flags) covers four jobs:
 
-![ESP-Prog-2 Flasher TUI: detect, pick a USB device, flash the PSoC 6](docs/images/tui-demo.gif)
+![ESP-Prog-2 Flasher dashboard: filter, "/" commands, SOLO flash wizard, run view](docs/images/tui-demo.gif)
 
 1. **Flash an RA4M1 bootloader (and application) to a target board** through the
    probe (auto-detects the ESP-Prog-2 on Espressif's USB VID `0x303A`/PID `0x1002`, detects whether the
@@ -18,8 +19,14 @@ A `uv`-run Python **TUI/CLI** for the **ESP-Prog-2** debug probe. It does three 
 2. **Flash the PSoC 6 on the IDU Radar board** — writes the bundled full image
    (bootloader + App1, `hex/psoc6_radar_full_image.hex`) to the PSoC 62S3's main
    flash over SWD with pyOCD. See [PSoC 6 (IDU Radar)](#psoc-6-idu-radar).
-3. **Reflash the ESP-Prog-2's own firmware** — writes the bundled
-   `firmware/esp-prog2.bin` to the ESP32-S3 with **esptool**.
+3. **Set up a SOLO ODU/IDU board (ESP32-S3)** over the board's **own** USB port —
+   writes the Embedded-CAN-Bootloaders bundle plus the board's `cancfg`
+   (device config block and board profile) with **esptool**. The same port
+   can provision or read just the `cancfg` of an ESP32-S3 CAN node. See
+   [SOLO boards](#solo-boards-esp32-s3) and
+   [ESP32-S3 CAN node config](#esp32-s3-can-node-config-cli-only).
+4. **Reflash the ESP-Prog-2's own firmware** — writes the bundled
+   `firmware/esp-prog2.bin` to the probe's ESP32-S3 with **esptool**.
 
 Default target: **Renesas RA4M1 / R7FA4M1AB** (the MCU on an Arduino UNO R4 Minima).
 Default target firmware: bundled `hex/dfu_minima.hex` (the stock R4 Minima DFU bootloader).
@@ -73,9 +80,7 @@ uv sync          # create .venv from uv.lock
 uv run esp-prog2-flasher          # launch the interactive TUI
 ```
 
-![TUI main screen: probe and RA4M1 detected, all four panels](docs/images/tui-main.png)
-
-> The screenshots show an earlier layout; refreshing them for the dashboard is tracked in #19.
+![Dashboard with a SOLO preset selected: targets on the left, its details and commands on the right](docs/images/tui-dashboard.png)
 
 The TUI is a keyboard-driven dashboard in the style of
 [TTSSH](https://github.com/XiaoKChen/TTSSH):
@@ -142,6 +147,8 @@ browser.
 The RA4M1 rows need a Detect that found the RA4M1; one runs at start-up and
 `/ d` repeats it.
 
+![The "/" command popup on a SOLO preset](docs/images/tui-commands.png)
+
 **Every flash, erase or provision asks first.** The wizard ends on a summary:
 the chip or board, the image(s), the address range or layout and, for config
 writes, the manufacturer, product and CAN IDs. **`y`** starts the write,
@@ -150,6 +157,8 @@ official image never ask. A running job shows a spinner, a progress bar and
 its log; `esc` goes back to the dashboard while it keeps running, and no
 other write starts until it finishes. When it ends, the result shows in the
 status line and under Recent; `/ l` shows the whole session log.
+
+![The SOLO flash wizard's confirm step](docs/images/tui-solo-confirm.png)
 
 ### Keybindings
 
@@ -181,7 +190,7 @@ The TUI shows the same table with `/` `?`.
 
 In text fields every key, `/` included, is typed literally.
 
-![TUI with the IDU Radar device picked: boot CAN IDs filled and locked](docs/images/tui-device.png)
+![The RA4M1 bootloader wizard's USB device step: known devices with their fixed CAN IDs](docs/images/tui-device.png)
 
 ### Headless / scripting
 
@@ -231,6 +240,8 @@ decimal, `0x000..0x7FF`). Omit both to keep the bootloader defaults
 
 - `ODU Controller`, `ODU Superheat`, `ODU Air Sensor`, `ODU Power Board`
 - `IDU Controller`, `IDU Power Board`, `IDU Radar`, `IDU Articulation`, `IDU Air Sensor`
+- `SOLO ODU Controller`, `SOLO IDU Controller` (the SOLO presets; see
+  [SOLO boards](#solo-boards-esp32-s3))
 
 ## PSoC 6 (IDU Radar)
 
@@ -249,8 +260,6 @@ ESP-Prog-2 using pyOCD's built-in `cy8c6xx5` target (no CMSIS pack needed).
 - **Safety:** only data inside main flash (`0x10000000`-`0x10080000`) is written.
   Cypress metadata pseudo-sections (`0x90xxxxxx`) are dropped; any other
   out-of-range data (e.g. SFLASH, eFuse) aborts the flash before touching hardware.
-
-![TUI after flashing the bundled PSoC 6 image](docs/images/tui-psoc6.png)
 
 ## ESP32-S3 CAN node config (CLI only)
 
@@ -369,6 +378,7 @@ first runs.
 6. **Flash ESP-Prog-2** — writes `firmware/esp-prog2.bin` to the ESP32-S3 with
    esptool (`write-flash 0x0`). Requires the board in ROM download mode (hold
    BOOT, tap RESET) — see [`firmware/README.md`](firmware/README.md).
+7. **Flash a SOLO board** — see [SOLO boards](#solo-boards-esp32-s3).
 
 ## Layout
 
@@ -385,7 +395,10 @@ ESP-PROG-2-PY-CLI/
 ├── hex/             # bundled dfu_minima.hex (RA4M1 bootloader) + psoc6_radar_full_image.hex; override with --hex
 ├── firmware/        # bundled esp-prog2.bin (ESP-Prog-2's own firmware) + README
 ├── tools/           # pyOCD config + notes on flashing prerequisites
-├── scripts/         # build.ps1 / build.sh — PyInstaller one-file build
+├── packs/           # slim Renesas RA_DFP pack so r7fa4m1ab resolves offline
+├── scripts/         # build.* (PyInstaller), install.* (release installers), run-termux.sh
+├── tests/           # pytest suite
+├── docs/images/     # README screenshots + demo GIF
 ├── esp-prog2-flasher.spec   # PyInstaller spec (bundles hex/ + firmware/)
 └── pyproject.toml
 ```
