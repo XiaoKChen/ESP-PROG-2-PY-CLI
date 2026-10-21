@@ -42,8 +42,8 @@ from textual.binding import Binding, BindingType
 from textual.timer import Timer
 
 from . import __version__, flasher
-from .board_profile import BoardProfile
-from .dfu_config import DEFAULT_BOOT_CMD_ID, DEFAULT_BOOT_REPLY_ID, DfuConfig
+from .board_profile import BoardProfile, describe_read_profile
+from .dfu_config import DEFAULT_BOOT_CMD_ID, DEFAULT_BOOT_REPLY_ID
 from .flasher import DetectResult, TargetState
 from .tui import flows
 from .tui.browser import BrowserScreen
@@ -426,7 +426,8 @@ class FlasherApp(App[None]):
         self._post_status("ok" if ok else "err", message)
         self._dashboard.rebuild()
 
-    def _solo_config_read(self, config: DfuConfig | None) -> None:
+    def _solo_config_read(self, node: flasher.NodeConfig) -> None:
+        config = node.config
         if config is None:
             message = (
                 "Node config: unprovisioned/invalid (node uses defaults "
@@ -437,7 +438,7 @@ class FlasherApp(App[None]):
                 f"Node config: {config.manufacturer} / {config.product}, "
                 f"host->boot=0x{config.boot_cmd_id:03X} boot->host=0x{config.boot_reply_id:03X}"
             )
-        self._job_done(True, message)
+        self._job_done(True, f"{message}; {describe_read_profile(node.profile)}")
 
     def _flash_running(self) -> bool:
         return any(w.group == _FLASH_GROUP and not w.is_finished for w in self.workers)
@@ -581,12 +582,12 @@ class FlasherApp(App[None]):
     @work(thread=True, exclusive=True, group=_FLASH_GROUP)
     def read_solo_config_worker(self, port: str) -> None:
         try:
-            config = flasher.read_node_config(port, log=self._worker_log)
+            node = flasher.read_node_config(port, log=self._worker_log)
         except Exception as exc:  # noqa: BLE001
             logger.exception("SOLO config read worker failed")
             self.call_from_thread(self._job_done, False, f"Node config read failed: {exc}")
             return
-        self.call_from_thread(self._solo_config_read, config)
+        self.call_from_thread(self._solo_config_read, node)
 
     def _worker_log(self, message: str) -> None:
         """Log callback for flasher calls in workers; flasher text is plain, never markup."""

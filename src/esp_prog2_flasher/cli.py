@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Final
 
 from . import flasher
-from .board_profile import SOLO_PROFILES
+from .board_profile import SOLO_PROFILES, describe_read_profile
 from .dfu_config import (
     DEFAULT_BOOT_CMD_ID,
     DEFAULT_BOOT_REPLY_ID,
@@ -349,25 +349,27 @@ def _flash_solo(args: argparse.Namespace) -> None:
 
 
 def _read_node_config(port: str) -> None:
-    """Handle --read-node-config: print the node's decoded config block."""
+    """Handle --read-node-config: print the node's decoded config block and board profile."""
     try:
-        config = flasher.read_node_config(port, log=print)
+        node = flasher.read_node_config(port, log=print)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Node config read failed")
         print(f"Node config read failed: {exc}", file=sys.stderr)
         sys.exit(1)
+    config = node.config
     if config is None:
         print(
             "Node config: unprovisioned/invalid (node uses defaults "
             f"0x{DEFAULT_BOOT_CMD_ID:03X}/0x{DEFAULT_BOOT_REPLY_ID:03X})"
         )
-        return
-    print(f"Manufacturer: {config.manufacturer}")
-    print(f"Product:      {config.product}")
-    print(
-        f"Boot CAN IDs: host->boot=0x{config.boot_cmd_id:03X} "
-        f"boot->host=0x{config.boot_reply_id:03X}"
-    )
+    else:
+        print(f"Manufacturer: {config.manufacturer}")
+        print(f"Product:      {config.product}")
+        print(
+            f"Boot CAN IDs: host->boot=0x{config.boot_cmd_id:03X} "
+            f"boot->host=0x{config.boot_reply_id:03X}"
+        )
+    print(f"Board profile: {describe_read_profile(node.profile)}")
 
 
 def _probe_port_or_exit() -> str:

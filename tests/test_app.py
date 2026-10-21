@@ -314,9 +314,9 @@ def test_solo_read_config_runs_without_a_confirm(
 ) -> None:
     ports: list[str] = []
 
-    def fake_read(port: str, **_: object) -> DfuConfig | None:
+    def fake_read(port: str, **_: object) -> flasher.NodeConfig:
         ports.append(port)
-        return config
+        return flasher.NodeConfig(config, None)
 
     monkeypatch.setattr(flasher, "read_node_config", fake_read)
 

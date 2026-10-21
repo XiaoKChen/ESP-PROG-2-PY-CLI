@@ -4,7 +4,8 @@ The SOLO boards share one CAN bootloader and updater, so each board's TWAI pins,
 and early hold-LOW GPIOs come from a 24-byte board-profile record stored right after the v2
 DFU config block in the cancfg partition. This module encodes and validates that record,
 pads v2 block + record into the 4 KB cancfg image flasher.py writes, decodes a record read
-back exactly as the firmware would, and owns the SOLO ODU/IDU presets that cli.py offers.
+back exactly as the firmware would (and words it for the CLI and TUI), and owns the SOLO
+ODU/IDU presets that cli.py offers.
 
 Owns:        the record layout, magic, version, refused GPIOs and bitrate codes; the
              firmware's fallback record (DEFAULT_PROFILE_RECORD, mirrored here, owned by the
@@ -73,6 +74,14 @@ class Bitrate(IntEnum):
     KBPS_250 = 1
     KBPS_500 = 2
     MBPS_1 = 3
+
+
+BITRATE_LABELS: Final[dict[Bitrate, str]] = {
+    Bitrate.KBPS_125: "125 kbit/s",
+    Bitrate.KBPS_250: "250 kbit/s",
+    Bitrate.KBPS_500: "500 kbit/s",
+    Bitrate.MBPS_1: "1 Mbit/s",
+}
 
 
 # Flash layouts the release bundle carries; each name maps to the chip's flash size.
@@ -233,6 +242,22 @@ def parse_profile_record(data: bytes) -> ProfileRecord | None:
     if _rule_violation(tx, rx, bitrate_code, mask) is not None:
         return None
     return ProfileRecord(tx, rx, Bitrate(bitrate_code), mask)
+
+
+def describe_profile_record(record: ProfileRecord) -> str:
+    """One line naming the record's TWAI pins, bitrate and hold-LOW mask."""
+    return (
+        f"TWAI tx GPIO{record.twai_tx_gpio} rx GPIO{record.twai_rx_gpio}, "
+        f"{BITRATE_LABELS[record.bitrate]}, hold-LOW mask 0x{record.hold_low_mask:X}"
+    )
+
+
+def describe_read_profile(record: ProfileRecord | None) -> str:
+    """Describe a record read from a device; ``None`` names the updater's fallback instead."""
+    if record is None:
+        defaults = describe_profile_record(DEFAULT_PROFILE_RECORD)
+        return f"no board profile (updater defaults: {defaults})"
+    return describe_profile_record(record)
 
 
 def build_cancfg_image(config_block: bytes, record: ProfileRecord) -> bytes:

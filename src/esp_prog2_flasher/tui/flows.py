@@ -28,7 +28,14 @@ from pathlib import Path
 from typing import Final, Literal
 
 from .. import flasher
-from ..board_profile import CANCFG_IMAGE_SIZE, SOLO_PROFILES, Bitrate, BoardProfile
+from ..board_profile import (
+    BITRATE_LABELS,
+    CANCFG_IMAGE_SIZE,
+    SOLO_PROFILES,
+    Bitrate,
+    BoardProfile,
+    describe_profile_record,
+)
 from ..dfu_config import (
     CONFIG_ADDRESS,
     DEFAULT_BOOT_CMD_ID,
@@ -56,12 +63,6 @@ NO_APP: Final[str] = "\x00none"
 # (vs. the 16 KiB C bootloader's flasher.APP_BASE_ADDRESS == 0x4000).
 EMBASSY_APP_BASE_ADDRESS: Final[int] = 0x8000
 # ESP32-S3 USB-Serial-JTAG / ROM download PID: a SOLO board, or an ESP-Prog-2 in download mode.
-_BITRATE_LABELS: Final[dict[Bitrate, str]] = {
-    Bitrate.KBPS_125: "125 kbit/s",
-    Bitrate.KBPS_250: "250 kbit/s",
-    Bitrate.KBPS_500: "500 kbit/s",
-    Bitrate.MBPS_1: "1 Mbit/s",
-}
 _MISSING_IMAGE: Final[str] = "none — / f picks one"
 # The SWD targets that flash one image file, and how the browser picks it.
 ImageKind = Literal["boot", "app", "psoc6"]
@@ -639,11 +640,7 @@ def _solo_config_rows(profile: BoardProfile, manufacturer: str) -> list[Field]:
         ("Manufacturer", manufacturer),
         ("Product", profile.product),
         ("CAN IDs", can_ids_text(*profile.boot_ids)),
-        (
-            "Profile",
-            f"TWAI tx GPIO{record.twai_tx_gpio} rx GPIO{record.twai_rx_gpio}, "
-            f"{_BITRATE_LABELS[record.bitrate]}, hold-LOW mask 0x{record.hold_low_mask:X}",
-        ),
+        ("Profile", describe_profile_record(record)),
     ]
 
 
@@ -757,7 +754,7 @@ def _device_text(settings: Settings) -> str:
 
 def _bitrate_short(bitrate: Bitrate) -> str:
     """``250 kbit/s`` -> ``250k``, for the narrow details pane."""
-    return _BITRATE_LABELS[bitrate].replace(" kbit/s", "k").replace(" Mbit/s", "M")
+    return BITRATE_LABELS[bitrate].replace(" kbit/s", "k").replace(" Mbit/s", "M")
 
 
 def _hold_low_text(mask: int) -> str:

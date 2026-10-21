@@ -75,7 +75,7 @@ if TYPE_CHECKING:
     from pyocd.core.session import Session
     from pyocd.probe.debug_probe import DebugProbe
 
-    from .board_profile import BoardProfile
+    from .board_profile import BoardProfile, ProfileRecord
     from .dfu_config import DfuConfig
 
 logger = logging.getLogger(__name__)
@@ -1035,22 +1035,35 @@ def provision_node(
         log("Node config verified.")
 
 
+@dataclass(frozen=True, slots=True)
+class NodeConfig:
+    """What a node's cancfg partition decodes to; ``None`` parts are unprovisioned or invalid."""
+
+    config: DfuConfig | None
+    profile: ProfileRecord | None
+
+
 def read_node_config(
     port: str, baud: int = DEFAULT_BAUD_RATE, log: LogCallback | None = None
-) -> DfuConfig | None:
-    """Read and decode the DFU config block from an ESP32-S3 CAN node's cancfg partition.
+) -> NodeConfig:
+    """Read and decode the DFU config block and board-profile record of a node's cancfg partition.
 
-    Returns ``None`` when the block is unprovisioned or invalid — the node then
-    uses its defaults (0x79E/0x79F, empty name).
+    A ``None`` config means the block is unprovisioned or invalid — the node then
+    uses its defaults (0x79E/0x79F, empty name). A ``None`` profile means the
+    updater falls back to ``DEFAULT_PROFILE_RECORD``. Both parts come from one read.
 
     Raises:
         FlasherError: a valid partition table without a cancfg partition.
         FlashFailedError: esptool failed.
     """
+    from .board_profile import PROFILE_RECORD_OFFSET, PROFILE_RECORD_SIZE, parse_profile_record
     from .dfu_config import BLOCK_SIZE, parse_config_block
 
     offset = _node_cancfg_offset(port, baud, log)
-    return parse_config_block(_read_node_flash(port, baud, offset, BLOCK_SIZE, log))
+    data = _read_node_flash(port, baud, offset, PROFILE_RECORD_OFFSET + PROFILE_RECORD_SIZE, log)
+    return NodeConfig(
+        parse_config_block(data[:BLOCK_SIZE]), parse_profile_record(data[PROFILE_RECORD_OFFSET:])
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -28,7 +28,14 @@ from pathlib import Path
 
 import pytest
 
-from esp_prog2_flasher.board_profile import SOLO_PROFILES, build_cancfg_image
+from esp_prog2_flasher import flasher
+from esp_prog2_flasher.board_profile import (
+    CANCFG_IMAGE_SIZE,
+    PROFILE_RECORD_OFFSET,
+    PROFILE_RECORD_SIZE,
+    SOLO_PROFILES,
+    build_cancfg_image,
+)
 from esp_prog2_flasher.dfu_config import DEFAULT_MANUFACTURER, InvalidNameError
 from esp_prog2_flasher.flasher import (
     DEFAULT_BAUD_RATE,
@@ -44,6 +51,7 @@ from esp_prog2_flasher.flasher import (
     load_solo_bundle,
     otadata_selecting_ota0,
     provision_node,
+    read_node_config,
 )
 
 _PORT = "COM7"
@@ -434,6 +442,36 @@ def test_provision_node_with_profile_writes_the_cancfg_image() -> None:
     )
     assert fake.flash[0x11000] == _golden_cancfg("SOLO IDU Controller")
     assert fake.calls[-1][-3:] == ["0x11000", "4096", "read.bin"]
+
+
+def _stub_cancfg_read(monkeypatch: pytest.MonkeyPatch, image: bytes) -> list[int]:
+    sizes: list[int] = []
+
+    def fake_read(_port: str, _baud: int, _offset: int, size: int, *_a: object) -> bytes:
+        sizes.append(size)
+        return image[:size]
+
+    monkeypatch.setattr(flasher, "_node_cancfg_offset", lambda *_a, **_k: 0x11000)
+    monkeypatch.setattr(flasher, "_read_node_flash", fake_read)
+    return sizes
+
+
+def test_read_node_config_decodes_block_and_profile_in_one_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sizes = _stub_cancfg_read(monkeypatch, _golden_cancfg("SOLO IDU Controller"))
+    node = read_node_config(_PORT)
+    assert sizes == [PROFILE_RECORD_OFFSET + PROFILE_RECORD_SIZE]
+    assert node.config is not None and node.config.product == "SOLO IDU Controller"
+    assert node.profile == _IDU.record
+
+
+def test_read_node_config_reports_an_erased_partition_as_undecoded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_cancfg_read(monkeypatch, bytes([0xFF]) * CANCFG_IMAGE_SIZE)
+    node = read_node_config(_PORT)
+    assert node.config is None and node.profile is None
 
 
 def _fake_gh(
