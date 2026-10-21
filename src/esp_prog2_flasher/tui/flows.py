@@ -7,8 +7,9 @@ confirm dialog showed. Resolving a flow's answers yields the updated Settings an
 job request; FlasherApp runs the job with the same flasher calls cli.py makes.
 
 Owns:        Settings (the per-session choices: images, device and names, CAN IDs, SOLO port,
-             bundle, app, migrate flag), the job request types, the wizard steps and their
-             validation, the confirm summaries, and the details-pane fields for a target.
+             bundle, app, migrate flag, recent files per picker kind), the job request types, the
+             wizard steps and their validation, the confirm summaries, and the details-pane fields
+             for a target.
 Not here:    running jobs and every flasher call (../app.py); the wizard and browser screens
              (wizard.py, browser.py); config-block encoding (dfu_config.py).
 Invariants:  a KNOWN device or SOLO preset always carries its fixed CAN ID pair from
@@ -47,7 +48,7 @@ from ..dfu_config import (
     boot_ids_for_device,
 )
 from .browser import BrowseSpec, start_folder
-from .targets import Target
+from .targets import MAX_RECENT_FILES, Target
 from .widgets import Field
 from .wizard import BROWSE_VALUE, Answers, Choice, ChoiceStep, Confirm, Step, TextStep, WizardSpec
 
@@ -93,6 +94,10 @@ class Settings:
     solo_app: str = ""
     solo_migrate: bool = False
     solo_manufacturer: str = DEFAULT_MANUFACTURER
+    # The last files picked per picker kind, newest first; shown atop the file browser.
+    recent_hex: tuple[str, ...] = ()
+    recent_bin: tuple[str, ...] = ()
+    recent_bundle: tuple[str, ...] = ()
 
     @property
     def app_base_address(self) -> int:
@@ -247,12 +252,20 @@ def _job_flow(
 # ----- steps ---------------------------------------------------------------------------
 
 
-def _image_step(key: str, label: str, current: str, suffix: str, title: str) -> ChoiceStep:
+def _paths(files: tuple[str, ...]) -> tuple[Path, ...]:
+    return tuple(Path(file) for file in files)
+
+
+def _image_step(
+    key: str, label: str, current: str, suffix: str, title: str, recent: tuple[str, ...]
+) -> ChoiceStep:
     choices = []
     if current and Path(current).is_file():
         choices.append(Choice(current, Path(current).name, str(Path(current).parent)))
     choices.append(Choice(BROWSE_VALUE, "Browse…", f"pick a {suffix} file"))
-    browse = BrowseSpec(title, suffix, folder=False, start=start_folder(current))
+    browse = BrowseSpec(
+        title, suffix, folder=False, start=start_folder(current), recent=_paths(recent)
+    )
     return ChoiceStep(key, label, tuple(choices), current, browse)
 
 
@@ -339,6 +352,7 @@ def _bundle_steps(settings: Settings, answers: Answers) -> list[Step]:
         "",
         folder=True,
         start=start_folder(settings.solo_bundle_dir),
+        recent=_paths(settings.recent_bundle),
     )
     default = settings.solo_bundle_dir or RELEASE_BUNDLE
     steps: list[Step] = [ChoiceStep("bundle", "Bundle source", tuple(choices), default, browse)]
@@ -379,7 +393,31 @@ def with_image(settings: Settings, kind: ImageKind, path: str) -> Settings:
 def image_browse(settings: Settings, kind: ImageKind) -> BrowseSpec:
     """The browser that picks an SWD target's image (``/ f``)."""
     suffix, title = _IMAGE_PICKS[kind]
-    return BrowseSpec(title, suffix, folder=False, start=start_folder(image_of(settings, kind)))
+    return BrowseSpec(
+        title,
+        suffix,
+        folder=False,
+        start=start_folder(image_of(settings, kind)),
+        recent=_paths(settings.recent_bin if suffix == ".bin" else settings.recent_hex),
+    )
+
+
+def remember_picked_files(before: Settings, after: Settings) -> Settings:
+    """Put each image or bundle path ``after`` changed from ``before`` first in its recent list."""
+
+    def push(recent: tuple[str, ...], old: str, new: str) -> tuple[str, ...]:
+        if not new or new == old:
+            return recent
+        return (new, *(file for file in recent if file != new))[:MAX_RECENT_FILES]
+
+    hex_files = push(after.recent_hex, before.boot_hex, after.boot_hex)
+    bin_files = push(after.recent_bin, before.app_bin, after.app_bin)
+    return replace(
+        after,
+        recent_hex=push(hex_files, before.psoc6_hex, after.psoc6_hex),
+        recent_bin=push(bin_files, before.solo_app, after.solo_app),
+        recent_bundle=push(after.recent_bundle, before.solo_bundle_dir, after.solo_bundle_dir),
+    )
 
 
 def _with_port(settings: Settings, answers: Answers) -> Settings:
@@ -439,7 +477,12 @@ def solo_flash_job(settings: Settings, product: str) -> SoloFlashJob:
 def boot_flash_flow(settings: Settings) -> JobFlow:
     def steps(answers: Answers) -> list[Step]:
         image = _image_step(
-            "image", "Bootloader image (.hex)", settings.boot_hex, ".hex", "Select bootloader .hex"
+            "image",
+            "Bootloader image (.hex)",
+            settings.boot_hex,
+            ".hex",
+            "Select bootloader .hex",
+            settings.recent_hex,
         )
         return [image, *_device_steps(settings, answers)]
 
@@ -459,7 +502,12 @@ def app_flash_flow(settings: Settings) -> JobFlow:
 
     def steps(_answers: Answers) -> list[Step]:
         image = _image_step(
-            "image", "Application image (.bin)", settings.app_bin, ".bin", "Select application .bin"
+            "image",
+            "Application image (.bin)",
+            settings.app_bin,
+            ".bin",
+            "Select application .bin",
+            settings.recent_bin,
         )
         bases = (
             Choice(c_base, c_base, "C bootloader (16 KiB)"),
@@ -481,7 +529,12 @@ def psoc6_flash_flow(settings: Settings) -> JobFlow:
     def steps(_answers: Answers) -> list[Step]:
         return [
             _image_step(
-                "image", "PSoC 6 image (.hex)", settings.psoc6_hex, ".hex", "Select PSoC 6 .hex"
+                "image",
+                "PSoC 6 image (.hex)",
+                settings.psoc6_hex,
+                ".hex",
+                "Select PSoC 6 .hex",
+                settings.recent_hex,
             )
         ]
 
@@ -615,7 +668,11 @@ def solo_app_flow(settings: Settings) -> EditFlow:
         choices.append(Choice(settings.solo_app, Path(settings.solo_app).name, "current"))
     choices.append(Choice(BROWSE_VALUE, "Browse…", "pick a .bin file"))
     browse = BrowseSpec(
-        "Select SOLO app .bin", ".bin", folder=False, start=start_folder(settings.solo_app)
+        "Select SOLO app .bin",
+        ".bin",
+        folder=False,
+        start=start_folder(settings.solo_app),
+        recent=_paths(settings.recent_bin),
     )
     step = ChoiceStep(
         "app", "App image for ota_0 (optional)", tuple(choices), settings.solo_app or NO_APP, browse

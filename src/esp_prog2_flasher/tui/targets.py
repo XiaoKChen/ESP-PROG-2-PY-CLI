@@ -6,9 +6,10 @@ ESP-Prog-2 itself over USB), one row per flash target, then the runs of this ses
 acts on them.
 
 Owns:        TARGET_GROUPS (one SOLO row per board_profile.SOLO_PROFILES preset), the
-             Target/RecentRun shapes, the recent-run limit and the relative-time wording.
+             Target/RecentRun shapes, the recent-run and recent-file limits and the relative-time
+             wording.
 Not here:    rendering (widgets.py, screens.py), per-target settings and jobs (flows.py),
-             persisting recents across sessions (not done; issue #19).
+             saving recents between launches (state.py).
 Invariants:  a Target is hashable and its key is unique across TARGET_GROUPS.
 Depends on:  board_profile.py and the standard library.
 See also:    screens.py (DashboardScreen), ../app.py
@@ -26,6 +27,7 @@ TargetKind = Literal["boot", "app", "psoc6", "solo", "probe"]
 Operation = Literal["flash", "provision", "read", "download"]
 
 MAX_RECENTS: Final[int] = 10
+MAX_RECENT_FILES: Final[int] = 5  # per picker kind, atop the file browser
 _SECONDS_PER_MINUTE: Final[int] = 60
 _SECONDS_PER_HOUR: Final[int] = 3600
 _SECONDS_PER_DAY: Final[int] = 86400
@@ -89,7 +91,7 @@ TARGET_GROUPS: Final[tuple[TargetGroup, ...]] = (
 
 @dataclass(frozen=True, slots=True)
 class RecentRun:
-    """One finished job of this session, shown under Recent."""
+    """One finished job, shown under Recent (restored from the saved state on launch)."""
 
     id: int
     target: Target

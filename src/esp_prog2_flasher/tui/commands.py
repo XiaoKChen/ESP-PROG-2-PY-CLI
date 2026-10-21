@@ -38,6 +38,7 @@ CommandAction = Literal[
     "log",
     "help",
     "quit",
+    "forget",
     "use_folder",
     "type_path",
 ]
@@ -98,6 +99,7 @@ BROWSER_COMMANDS: Final[tuple[Command, ...]] = (
 )
 GLOBAL_COMMANDS: Final[tuple[Command, ...]] = (
     Command("l", "log", "log"),
+    Command("c", "forget saved state", "forget"),
     Command("?", "full help", "help"),
     Command("q", "quit", "quit"),
 )

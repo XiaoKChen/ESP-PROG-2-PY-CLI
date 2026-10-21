@@ -36,6 +36,7 @@ from .screens import NARROW_BREAKPOINTS, ChromeScreen
 from .widgets import ChromeState, DetailsView, Field, FilterList, GlobalCommand, Hint, ListRow
 
 _DRIVE_KEY_PREFIX: Final[str] = "drive:"
+_RECENT_KEY_PREFIX: Final[str] = "recent:"
 _BYTES_PER_KB: Final[int] = 1024
 _TITLE_MARGIN: Final[int] = 6
 
@@ -48,6 +49,7 @@ class BrowseSpec:
     suffix: str
     folder: bool
     start: Path
+    recent: tuple[Path, ...] = ()  # last picks of this kind; missing ones are not listed
 
     @property
     def mode(self) -> BrowserMode:
@@ -132,10 +134,21 @@ class BrowserScreen(ChromeScreen[Path | None]):
         )
         return folders + files
 
+    def _recent_rows(self, terms: list[str]) -> list[ListRow]:
+        exists = Path.is_dir if self.spec.folder else Path.is_file
+        paths = [
+            p for p in self.spec.recent if exists(p) and all(t in p.name.lower() for t in terms)
+        ]
+        if not paths:
+            return []
+        rows = [ListRow("header:recent", "── Recent ──", selectable=False)]
+        rows += [ListRow(f"{_RECENT_KEY_PREFIX}{p}", p.name, str(p.parent)) for p in paths]
+        return rows
+
     def rebuild(self) -> None:
         query = self.entry_list.query_text
         terms = query.lower().split()
-        rows = []
+        rows = [] if self.folder is None else self._recent_rows(terms)
         for path in self._entries():
             if self.folder is None:
                 rows.append(ListRow(f"{_DRIVE_KEY_PREFIX}{path}", str(path), "drive"))
@@ -172,7 +185,7 @@ class BrowserScreen(ChromeScreen[Path | None]):
         row = self.entry_list.selected
         if row is None:
             return None
-        return Path(row.key.removeprefix(_DRIVE_KEY_PREFIX))
+        return Path(row.key.removeprefix(_DRIVE_KEY_PREFIX).removeprefix(_RECENT_KEY_PREFIX))
 
     def _show_details(self) -> None:
         path = self._selected_path()
@@ -237,7 +250,8 @@ class BrowserScreen(ChromeScreen[Path | None]):
         path = self._selected_path()
         if path is None:
             return
-        if path.is_dir():
+        row = self.entry_list.selected
+        if path.is_dir() and not (row and row.key.startswith(_RECENT_KEY_PREFIX)):
             self._open(path)
         else:
             self.dismiss(path)

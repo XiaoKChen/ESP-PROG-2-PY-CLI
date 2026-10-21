@@ -245,6 +245,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=flasher.DEFAULT_FREQUENCY_HZ,
         help=f"SWD clock in Hz for target flashing (default: {flasher.DEFAULT_FREQUENCY_HZ}).",
     )
+    p.add_argument(
+        "--no-state",
+        action="store_true",
+        help="TUI only: do not load or save the remembered settings, recent runs and files.",
+    )
     return p
 
 
@@ -625,7 +630,7 @@ def main() -> None:
     # Default: interactive TUI.
     from .app import run
 
-    run(hex_path=args.hex or flasher.find_default_hex(), frequency=args.freq)
+    run(hex_path=args.hex, frequency=args.freq, no_state=args.no_state)
 
 
 if __name__ == "__main__":

@@ -8,10 +8,12 @@ job in a thread worker with the same flasher calls cli.py makes. cli.py launches
 flags are given.
 
 Owns:        the session state (Settings, detect results, serial port, recents, log lines,
-             status message and activity), the command dispatch, the job workers and the
-             header/details text derived from that state.
-Not here:    USB/serial/SWD access and all flashing logic (flasher.py); the screens, wizard
-             steps, browser and command table (tui/); config-block encoding (dfu_config.py).
+             status message and activity), when it is loaded from and saved to the state file,
+             the command dispatch, the job workers and the header/details text derived from that
+             state.
+Not here:    USB/serial/SWD access and all flashing logic (flasher.py); the state file's format
+             and I/O (tui/state.py); the screens, wizard steps, browser and command table (tui/);
+             config-block encoding (dfu_config.py).
 Invariants:  no flash, erase or provision starts before its wizard's confirm returns "y".
              Flashing the RA4M1 needs a Detect that found a flashable RA4M1. A SOLO port is
              never guessed: the user picks or types it. No write starts while one runs.
@@ -35,6 +37,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import ClassVar, Final
 
+from rich.console import RenderableType
 from rich.markup import escape
 from textual import work
 from textual.app import App
@@ -45,7 +48,7 @@ from . import __version__, flasher
 from .board_profile import BoardProfile, describe_read_profile
 from .dfu_config import DEFAULT_BOOT_CMD_ID, DEFAULT_BOOT_REPLY_ID
 from .flasher import DetectResult, TargetState
-from .tui import flows
+from .tui import flows, state
 from .tui.browser import BrowserScreen
 from .tui.commands import GLOBAL_COMMANDS, Command, CommandAction
 from .tui.screens import ChromeScreen, DashboardScreen, HelpScreen, LogScreen, RunScreen
@@ -85,22 +88,34 @@ class FlasherApp(App[None]):
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
     ]
 
-    def __init__(self, hex_path: Path | None = None, frequency: int = flasher.DEFAULT_FREQUENCY_HZ):
+    def __init__(
+        self,
+        hex_path: Path | None = None,
+        frequency: int = flasher.DEFAULT_FREQUENCY_HZ,
+        state_path: Path | None = None,
+        no_state: bool = False,
+    ):
         super().__init__()
         self._frequency = frequency
         boot_hex = hex_path or flasher.find_default_hex()
         psoc6_hex = flasher.find_default_psoc6_hex()
-        self._settings = flows.Settings(
+        self._defaults = flows.Settings(
             boot_hex=str(boot_hex) if boot_hex else "",
             psoc6_hex=str(psoc6_hex) if psoc6_hex else "",
         )
+        self._settings = self._defaults
+        self._state_path = None if no_state else state_path or state.default_state_path()
+        self._state_writable = True  # False: leave a newer-format file alone
+        self._state_save_failed = False
+        self._startup_notice: tuple[StatusLevel, str] | None = None
+        self._recents: list[RecentRun] = []
+        saved_selection, saved_collapsed = self._load_saved_state(hex_path)
         self._chrome = ChromeState(version=__version__)
         self._detect: DetectResult | None = None
         self._psoc6_detect: DetectResult | None = None
         self._serial: flasher.ProbeSerial | None = None
         self._download_candidates: list[flasher.SerialPortInfo] = []
-        self._recents: list[RecentRun] = []
-        self._run_ids = itertools.count(1)
+        self._run_ids = itertools.count(len(self._recents) + 1)
         self._log_lines: list[str] = []
         self._activities: dict[str, str] = {}  # worker group -> what it is doing
         self._spinner: Timer | None = None
@@ -108,7 +123,7 @@ class FlasherApp(App[None]):
         self._status_id = 0
         self._job: tuple[Target, Operation, str] | None = None  # target, operation, detail
         self._run_screen: RunScreen | None = None
-        self._dashboard = DashboardScreen(self._chrome, self)
+        self._dashboard = DashboardScreen(self._chrome, self, saved_collapsed, saved_selection)
         for theme in THEMES:
             self.register_theme(theme)
         self.theme = theme_name_for_terminal(os.environ)
@@ -119,7 +134,40 @@ class FlasherApp(App[None]):
     def get_theme_variable_defaults(self) -> dict[str, str]:
         return dict(THEMES[0].variables)
 
+    def _load_saved_state(self, hex_path: Path | None) -> tuple[str | None, tuple[str, ...]]:
+        """Apply the saved state to the session; return the saved selection and folded groups."""
+        if self._state_path is None:
+            return None, ()
+        loaded = state.load_state(self._state_path)
+        self._state_writable = loaded.overwritable
+        if loaded.problem is not None:
+            self._startup_notice = ("warn", loaded.problem)
+        if loaded.state is None:
+            return None, ()
+        settings, missing = state.restore_settings(loaded.state.settings, self._defaults)
+        if hex_path is not None:  # an explicit --hex beats the saved bootloader image
+            settings = replace(settings, boot_hex=str(hex_path))
+        self._settings = settings
+        self._recents = list(loaded.state.recents)
+        if missing:
+            self._startup_notice = (
+                "warn",
+                f"Saved path no longer exists, using the default: {', '.join(missing)}",
+            )
+        return loaded.state.selected, loaded.state.collapsed
+
+    def exit(
+        self,
+        result: None = None,
+        return_code: int = 0,
+        message: RenderableType | None = None,
+    ) -> None:
+        self._save_state()
+        super().exit(result, return_code, message)
+
     def on_mount(self) -> None:
+        if self._startup_notice is not None:
+            self._post_status(*self._startup_notice)
         self._write_log(
             f"Target: [b]{flasher.TARGET_TYPE}[/b] via pyOCD  •  "
             f"Probe fw: [b]{flasher.PROBE_CHIP}[/b] via esptool"
@@ -204,8 +252,13 @@ class FlasherApp(App[None]):
     def on_status_posted(self, message: StatusPosted) -> None:
         self._post_status(message.level, message.text)
 
+    def view_changed(self) -> None:
+        self._save_state()
+
     def _run_global(self, command: Command) -> None:
-        if command.action == "log":
+        if command.action == "forget":
+            self._forget_state()
+        elif command.action == "log":
             self.push_screen(LogScreen(self._chrome, "Session log", self._log_lines))
         elif command.action == "help":
             self.push_screen(HelpScreen(self._chrome))
@@ -340,8 +393,37 @@ class FlasherApp(App[None]):
         self.push_screen(WizardScreen(self._chrome, flow.spec), done)
 
     def _update_settings(self, settings: flows.Settings) -> None:
-        self._settings = settings
+        self._settings = flows.remember_picked_files(self._settings, settings)
         self._dashboard.rebuild()
+        self._save_state()
+
+    def _save_state(self) -> None:
+        if self._state_path is None or not self._state_writable:
+            return
+        selected, collapsed = self._dashboard.view_state
+        snapshot = state.SavedState(self._settings, tuple(self._recents), selected, collapsed)
+        try:
+            state.save_state(self._state_path, snapshot)
+        except OSError as exc:
+            logger.warning("Could not save state to %s", self._state_path, exc_info=True)
+            if not self._state_save_failed:
+                self._state_save_failed = True
+                self._post_status("warn", f"Cannot save state: {exc.strerror or exc}")
+
+    def _forget_state(self) -> None:
+        if self._state_path is None:
+            self._post_status("warn", "Saved state is off (--no-state): nothing to forget.")
+            return
+        try:
+            state.forget_state(self._state_path)
+        except OSError as exc:
+            self._post_status("err", f"Cannot delete the saved state: {exc.strerror or exc}")
+            return
+        self._state_writable = True
+        self._settings = self._defaults
+        self._recents = []
+        self._dashboard.reset_view()
+        self._post_status("ok", "Saved state forgotten; defaults restored.")
 
     # ----- jobs ------------------------------------------------------------------------
 
@@ -417,6 +499,7 @@ class FlasherApp(App[None]):
                 next(self._run_ids), target, operation, detail, ok, message, datetime.now()
             )
             self._recents = [recent, *self._recents][:MAX_RECENTS]
+            self._save_state()
         self._job = None
         run_screen, self._run_screen = self._run_screen, None
         if run_screen is not None:
@@ -699,5 +782,9 @@ class FlasherApp(App[None]):
                 screen.append_log(message)
 
 
-def run(hex_path: Path | None = None, frequency: int = flasher.DEFAULT_FREQUENCY_HZ) -> None:
-    FlasherApp(hex_path=hex_path, frequency=frequency).run()
+def run(
+    hex_path: Path | None = None,
+    frequency: int = flasher.DEFAULT_FREQUENCY_HZ,
+    no_state: bool = False,
+) -> None:
+    FlasherApp(hex_path=hex_path, frequency=frequency, no_state=no_state).run()
