@@ -2,7 +2,8 @@
 # Run esp-prog2-flasher from source on Termux (Android).
 #
 # Installs the runtime dependencies (read from pyproject.toml) into Termux's system pip on
-# first run, then launches the package with src/ on PYTHONPATH, passing all arguments through.
+# first run (or whenever one is missing), then launches the package with src/ on
+# PYTHONPATH, passing all arguments through.
 #
 # Owns:        the Termux-specific bootstrap: dependency install and the PYTHONPATH launch.
 # Not here:    packaged binaries (scripts/build.*, scripts/install.*); everywhere other than
@@ -36,19 +37,27 @@ if ! command -v pip >/dev/null 2>&1; then
     exit 1
 fi
 
-# Install runtime deps only when they aren't already importable, so repeat runs
+# Install runtime deps only when one isn't already installed, so repeat runs
 # stay fast and offline. The project itself is not installed (its uv_build
-# backend won't build on Android) — src/ goes on PYTHONPATH below instead. The
-# dep list is read from pyproject.toml so it can't drift from the real set.
-if ! python -c 'import pyocd, esptool, serial, textual, truststore' 2>/dev/null; then
+# backend won't build on Android) — src/ goes on PYTHONPATH below instead. Both
+# the install list and the "installed?" check come from pyproject.toml so they
+# can't drift from the real set; the check looks up each distribution's metadata
+# by name, so no distribution → import-name map is needed.
+mapfile -t DEPS < <(
+    python -c 'import pathlib, tomllib; print("\n".join(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["dependencies"]))'
+)
+if [ "${#DEPS[@]}" -eq 0 ]; then
+    echo "Error: parsed no dependencies from pyproject.toml — aborting." >&2
+    exit 1
+fi
+# Exits non-zero (PackageNotFoundError) on the first requirement with no installed
+# distribution; the name is the requirement string up to its extras/version specifier.
+if ! python -c '
+import importlib.metadata, re, sys
+for requirement in sys.argv[1:]:
+    importlib.metadata.version(re.match(r"[A-Za-z0-9._-]+", requirement).group())
+' "${DEPS[@]}" 2>/dev/null; then
     echo "Installing runtime dependencies (first run)…"
-    mapfile -t DEPS < <(
-        python -c 'import pathlib, tomllib; print("\n".join(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["dependencies"]))'
-    )
-    if [ "${#DEPS[@]}" -eq 0 ]; then
-        echo "Error: parsed no dependencies from pyproject.toml — aborting." >&2
-        exit 1
-    fi
     pip install "${DEPS[@]}"
 fi
 
