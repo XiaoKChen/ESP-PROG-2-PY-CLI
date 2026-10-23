@@ -15,8 +15,9 @@ Owns:        probe VID/PID and target-type names, the serial-port classification
              ESPTOOL_SHIM_FLAG (the frozen-build esptool re-exec flag dispatched by cli.py),
              and the node's partition-table offset/entry format, the cancfg partition identity
              and its fallback offset; the SOLO release bundle (repo, default tag, asset pattern,
-             manifest format and its validation), the SOLO flash sequence, and the otadata image
-             that selects ota_0.
+             manifest format and its validation), which board-profile record version a bundle
+             reads (PROFILE_V2_MIN_BUNDLE_VERSION), the SOLO flash sequence, and the otadata
+             image that selects ota_0.
 Not here:    DFU config-block encoding/decoding and the device table (dfu_config.py), the
              board-profile record, cancfg image and SOLO presets (board_profile.py), argument
              parsing (cli.py), the TUI (app.py).
@@ -27,7 +28,10 @@ Invariants:  a node's config block is only written to the cancfg partition its p
              (--after no-reset); a separate final chip-id call reboots the board with
              --after watchdog-reset, because the RTS hard reset does not reboot an ESP32-S3
              over USB-Serial-JTAG. That call's exit code is ignored: the port re-enumerates
-             as the chip reboots, which esptool reports as a serial error.
+             as the chip reboots, which esptool reports as a serial error. A board-profile
+             record v2 is written only where the updater reads it: by flash_solo when the
+             bundle's version is at least PROFILE_V2_MIN_BUNDLE_VERSION, by provision_node
+             when the node already holds a valid v2 record; v1 everywhere else.
 Concurrency: calls block until hardware I/O finishes; progress and log callbacks fire on the
              calling thread, so the TUI runs these functions in worker threads.
 Errors:      FlasherError hierarchy (ProbeNotFoundError, FlashFailedError, BundleError for a
@@ -75,7 +79,7 @@ if TYPE_CHECKING:
     from pyocd.core.session import Session
     from pyocd.probe.debug_probe import DebugProbe
 
-    from .board_profile import BoardProfile, ProfileRecord
+    from .board_profile import BoardProfile, ProfileRecord, ProfileVersion
     from .dfu_config import DfuConfig
 
 logger = logging.getLogger(__name__)
@@ -994,8 +998,10 @@ def provision_node(
     The offset comes from the node's partition table (``DEFAULT_CANCFG_OFFSET`` if
     it has none). With a ``profile``, its board-profile record follows the block as
     the full 4 KB cancfg image (board_profile.build_cancfg_image); the block's names
-    and IDs still come from the arguments. After writing, everything written is read
-    back and compared byte-for-byte.
+    and IDs still come from the arguments. The record is written as v2 only when the
+    node already holds a valid v2 record (so its updater reads v2); otherwise as v1, since
+    an older updater rejects v2 and falls back to its default TWAI pins. After writing,
+    everything written is read back and compared byte-for-byte.
 
     Raises:
         InvalidNameError, InvalidCanIdError, InvalidProfileError: bad names/IDs or a
@@ -1003,14 +1009,31 @@ def provision_node(
         FlasherError: a valid partition table without a cancfg partition.
         FlashFailedError: esptool failed, or the read-back differs from the block.
     """
-    from .board_profile import build_cancfg_image
+    from .board_profile import (
+        PROFILE_RECORD_MAX_SIZE,
+        PROFILE_RECORD_OFFSET,
+        PROFILE_VERSION_V1,
+        PROFILE_VERSION_V2,
+        build_cancfg_image,
+        profile_record_version,
+    )
     from .dfu_config import build_config_block
 
-    # Fail fast on bad names/IDs before touching hardware.
+    # Fail fast on bad names/IDs and on either record before touching hardware.
     block = build_config_block(manufacturer, product, boot_cmd_id, boot_reply_id)
     if profile is not None:
-        block = build_cancfg_image(block, profile.record)
+        for candidate in (PROFILE_VERSION_V1, PROFILE_VERSION_V2):
+            build_cancfg_image(block, profile.record_for(candidate), candidate)
     offset = _node_cancfg_offset(port, baud, log, runner)
+    if profile is not None:
+        current = _read_node_flash(
+            port, baud, offset, PROFILE_RECORD_OFFSET + PROFILE_RECORD_MAX_SIZE, log, runner
+        )
+        version = profile_record_version(current[PROFILE_RECORD_OFFSET:]) or PROFILE_VERSION_V1
+        if log:
+            held = "a v2" if version == PROFILE_VERSION_V2 else "no v2"
+            log(f"Writing board-profile record v{version} (the node holds {held} record)")
+        block = build_cancfg_image(block, profile.record_for(version), version)
 
     if log:
         log(f"Writing DFU config block ({len(block)} bytes) @ 0x{offset:X}")
@@ -1057,11 +1080,13 @@ def read_node_config(
         FlasherError: a valid partition table without a cancfg partition.
         FlashFailedError: esptool failed.
     """
-    from .board_profile import PROFILE_RECORD_OFFSET, PROFILE_RECORD_SIZE, parse_profile_record
+    from .board_profile import PROFILE_RECORD_MAX_SIZE, PROFILE_RECORD_OFFSET, parse_profile_record
     from .dfu_config import BLOCK_SIZE, parse_config_block
 
     offset = _node_cancfg_offset(port, baud, log)
-    data = _read_node_flash(port, baud, offset, PROFILE_RECORD_OFFSET + PROFILE_RECORD_SIZE, log)
+    data = _read_node_flash(
+        port, baud, offset, PROFILE_RECORD_OFFSET + PROFILE_RECORD_MAX_SIZE, log
+    )
     return NodeConfig(
         parse_config_block(data[:BLOCK_SIZE]), parse_profile_record(data[PROFILE_RECORD_OFFSET:])
     )
@@ -1073,7 +1098,15 @@ def read_node_config(
 # ---------------------------------------------------------------------------
 
 SOLO_BUNDLE_REPO: Final[str] = "XiaoKChen/Embedded-CAN-Bootloaders"
+# The ODU's early safe holds and fan-off writes (board-profile record v2) need
+# c-cpp-esp32-v1.3.0; move this default to it once that release is published.
 DEFAULT_SOLO_BUNDLE_TAG: Final[str] = "c-cpp-esp32-v1.2.1"
+# FROZEN CONTRACT — the first Embedded-CAN-Bootloaders bundle whose bootloader and updater
+# read board-profile record v2. Older ones reject v2 and fall back to TX 4/RX 5 with no holds.
+PROFILE_V2_MIN_BUNDLE_VERSION: Final[tuple[int, int, int]] = (1, 3, 0)
+# manifest.json "version": the release tag minus "c-cpp-esp32-v" ("1.2.1"), or a git-describe
+# snapshot ("1.2.1-4-gabc1234-dirty") whose leading X.Y.Z is the last release before it.
+_BUNDLE_VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(r"v?(\d+)\.(\d+)\.(\d+)(?:\D|$)")
 SOLO_BUNDLE_ASSET_PATTERN: Final[str] = "esp32s3-can-updater-*.zip"
 SOLO_MANIFEST_NAME: Final[str] = "manifest.json"
 SOLO_MANIFEST_FORMAT: Final[int] = 1
@@ -1248,6 +1281,22 @@ def load_solo_bundle(bundle_dir: Path) -> SoloBundle:
     )
 
 
+def bundle_profile_version(bundle_version: str) -> ProfileVersion:
+    """The board-profile record version a bundle's bootloader and updater read.
+
+    2 when ``bundle_version`` (manifest.json's ``version``) is at least
+    ``PROFILE_V2_MIN_BUNDLE_VERSION``; 1 otherwise, including a version that does not
+    parse, because v1 is the record every bundle reads.
+    """
+    from .board_profile import PROFILE_VERSION_V1, PROFILE_VERSION_V2
+
+    match = _BUNDLE_VERSION_PATTERN.match(bundle_version)
+    if match is None:
+        return PROFILE_VERSION_V1
+    release = (int(match[1]), int(match[2]), int(match[3]))
+    return PROFILE_VERSION_V2 if release >= PROFILE_V2_MIN_BUNDLE_VERSION else PROFILE_VERSION_V1
+
+
 def otadata_selecting_ota0() -> bytes:
     """Return an 8 KB otadata image whose first entry selects ota_0; the rest is erased.
 
@@ -1301,7 +1350,9 @@ def flash_solo(
     2. One ``write-flash --flash-mode dio --flash-freq 80m --flash-size <layout>`` of the
        bootloader, the layout's partition table, the blank otadata, the CAN updater at
        the layout's ``factory`` offset and the board's cancfg image (v2 block + profile
-       record, 4 KB) at 0x11000.
+       record, 4 KB) at 0x11000. The record is v2 when the bundle reads it
+       (bundle_profile_version), else the preset's v1 record, with a warning when that
+       drops the preset's v2-only safe holds or I2C safe writes.
     3. Read cancfg back and compare it byte-for-byte.
     4. With ``app``, write it at ``ota_0`` plus an otadata image selecting ota_0;
        without it the board boots the CAN updater.
@@ -1331,13 +1382,23 @@ def flash_solo(
             f"{profile.product} needs {profile.flash_size}"
         )
     app_path = _checked_app_image(app) if app is not None else None
-    cancfg = build_cancfg_image(profile.config_block(manufacturer), profile.record)
+    record_version = bundle_profile_version(bundle.version)
+    record = profile.record_for(record_version)
+    cancfg = build_cancfg_image(profile.config_block(manufacturer), record, record_version)
 
     def _log(msg: str) -> None:
         if log is not None:
             log(msg)
 
     _log(f"Flashing {profile.product} ({profile.layout}, bundle {bundle.version}) on {port}")
+    _log(f"Board-profile record v{record_version}")
+    if record != profile.record:
+        minimum = ".".join(str(part) for part in PROFILE_V2_MIN_BUNDLE_VERSION)
+        _log(
+            f"WARNING: bundle {bundle.version} predates c-cpp-esp32-v{minimum}, so "
+            f"{profile.product} gets its v1 record without its early safe holds and I2C "
+            f"safe writes; use bundle {minimum} or later for them"
+        )
     with tempfile.TemporaryDirectory() as tmp:
         cancfg_path = Path(tmp) / "cancfg.bin"
         cancfg_path.write_bytes(cancfg)
