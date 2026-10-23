@@ -1098,6 +1098,7 @@ def read_node_config(
 # ---------------------------------------------------------------------------
 
 SOLO_BUNDLE_REPO: Final[str] = "XiaoKChen/Embedded-CAN-Bootloaders"
+SOLO_BUNDLE_TAG_PREFIX: Final[str] = "c-cpp-esp32-"  # release tags: c-cpp-esp32-vX.Y.Z
 # The ODU's early safe holds and fan-off writes (board-profile record v2) need
 # c-cpp-esp32-v1.3.0; move this default to it once that release is published.
 DEFAULT_SOLO_BUNDLE_TAG: Final[str] = "c-cpp-esp32-v1.2.1"
@@ -1288,11 +1289,38 @@ def bundle_profile_version(bundle_version: str) -> ProfileVersion:
     ``PROFILE_V2_MIN_BUNDLE_VERSION``; 1 otherwise, including a version that does not
     parse, because v1 is the record every bundle reads.
     """
+    from .board_profile import PROFILE_VERSION_V1
+
+    return _release_profile_version(bundle_version) or PROFILE_VERSION_V1
+
+
+def read_bundle_version(bundle_dir: Path) -> str | None:
+    """manifest.json's ``version`` in an unzipped bundle, or ``None`` if it cannot be read.
+
+    For display only: flash_solo still validates the whole bundle with load_solo_bundle.
+    """
+    try:
+        raw: object = json.loads((Path(bundle_dir) / SOLO_MANIFEST_NAME).read_text("utf-8"))
+    except (OSError, ValueError):  # missing or unreadable file, bad JSON or encoding
+        return None
+    version = raw.get("version") if isinstance(raw, dict) else None
+    return version if isinstance(version, str) else None
+
+
+def release_tag_profile_version(tag: str) -> ProfileVersion | None:
+    """The record version release ``tag`` (``c-cpp-esp32-vX.Y.Z``) will take, if it parses.
+
+    A prediction for display: flash_solo decides from the fetched manifest's version.
+    """
+    return _release_profile_version(tag.removeprefix(SOLO_BUNDLE_TAG_PREFIX))
+
+
+def _release_profile_version(version: str) -> ProfileVersion | None:
     from .board_profile import PROFILE_VERSION_V1, PROFILE_VERSION_V2
 
-    match = _BUNDLE_VERSION_PATTERN.match(bundle_version)
+    match = _BUNDLE_VERSION_PATTERN.match(version)
     if match is None:
-        return PROFILE_VERSION_V1
+        return None
     release = (int(match[1]), int(match[2]), int(match[3]))
     return PROFILE_VERSION_V2 if release >= PROFILE_V2_MIN_BUNDLE_VERSION else PROFILE_VERSION_V1
 

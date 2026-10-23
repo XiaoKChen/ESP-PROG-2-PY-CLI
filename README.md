@@ -98,7 +98,12 @@ The TUI is a keyboard-driven dashboard in the style of
   [Saved state](#saved-state)).
 - **Details** (right): the selection's settings (chip, image path, address or
   layout, USB names and CAN IDs, port, TWAI pins and bitrate, detect state,
-  last run), then the commands valid for it. Hidden below 80 columns.
+  last run), then the commands valid for it. Hidden below 80 columns. On a SOLO
+  row, `Record` names the board-profile record the selected bundle will write
+  (`v1`, `v2`, or `v?` with the note `v2 needs bundle ≥ 1.3.0` when a tag or
+  folder does not say), and `Holds`/`I2C` summarise that record, e.g.
+  `10 LOW · GPIO21 HIGH` and `0x2C: 5 writes`; the confirm summary and `/ r`
+  give the full masks.
 - **Status line**: `✓` success, `!` warning, `✗` error, cleared after a few
   seconds; a spinner while a job runs.
 - **Footer**: the keys for the current screen.

@@ -23,6 +23,7 @@ See also:     src/esp_prog2_flasher/app.py, src/esp_prog2_flasher/tui/
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -45,7 +46,7 @@ from esp_prog2_flasher.tui.commands import (
     GLOBAL_COMMANDS,
     help_rows,
 )
-from esp_prog2_flasher.tui.flows import Settings
+from esp_prog2_flasher.tui.flows import Settings, target_fields
 from esp_prog2_flasher.tui.screens import CommandPopup, DashboardScreen, HelpScreen, RunScreen
 from esp_prog2_flasher.tui.targets import SOLO_TARGETS, RecentRun
 from esp_prog2_flasher.tui.theme import DARK_THEME_NAME, LIGHT_THEME_NAME, theme_name_for_terminal
@@ -128,8 +129,31 @@ def wizard(app: FlasherApp) -> WizardScreen:
     return app.screen
 
 
+def _solo_bundle_settings(bundle: str, tmp_path: Path) -> Settings:
+    """``folder`` is a bundle folder without a manifest, ``folder:X.Y.Z`` one at that version."""
+    if bundle.startswith("folder"):
+        folder = tmp_path / "esp32s3-can-updater-x"
+        folder.mkdir()
+        if ":" in bundle:
+            manifest = {"version": bundle.partition(":")[2]}
+            (folder / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        return replace(Settings(), solo_bundle_dir=str(folder))
+    return replace(Settings(), solo_tag=bundle)
+
+
+# Every way the ODU's rows can grow: the default release (record v1), a release and a folder
+# with record v2 (holds and I2C), a folder on v1, and a tag or folder that names no version.
+@pytest.mark.parametrize(
+    "bundle",
+    ["c-cpp-esp32-v1.2.1", "c-cpp-esp32-v1.3.0", "folder:1.3.0", "folder:1.2.1", "v9", "folder"],
+)
 @pytest.mark.parametrize("size", [(80, 24), (120, 40)])
-def test_dashboard_mounts_with_every_details_pane_on_screen(size: tuple[int, int]) -> None:
+def test_dashboard_mounts_with_every_details_pane_on_screen(
+    size: tuple[int, int], bundle: str, tmp_path: Path
+) -> None:
+    state_file = tmp_path / "state.json"
+    save(state_file, settings=_solo_bundle_settings(bundle, tmp_path))
+
     async def check(app: FlasherApp, pilot: Pilot[None]) -> None:
         screen = app.screen
         assert isinstance(screen, DashboardScreen)
@@ -147,7 +171,55 @@ def test_dashboard_mounts_with_every_details_pane_on_screen(size: tuple[int, int
             content = screen.query_one(DetailsView).outer_size.height
             assert content <= details.content_size.height, key
 
-    run_app(check, size)
+    run_app(check, size, FlasherApp(state_path=state_file))
+
+
+_ODU_V2_ROWS = {"Holds": "10 LOW · GPIO21 HIGH", "I2C": "0x2C: 5 writes"}
+
+
+@pytest.mark.parametrize(
+    ("bundle", "expected"),
+    [
+        (
+            "c-cpp-esp32-v1.2.1",
+            {
+                "Record": "v1 · TWAI 4/5 @ 250k",
+                "Holds": "none (v2 needs ≥ 1.3.0)",
+                "Bundle": "c-cpp-esp32-v1.2.1",
+            },
+        ),
+        ("c-cpp-esp32-v1.3.0", {"Record": "v2 · TWAI 4/5 @ 250k", **_ODU_V2_ROWS}),
+        ("folder:1.3.0", {"Record": "v2 · TWAI 4/5 @ 250k", **_ODU_V2_ROWS}),
+        ("folder:1.2.1", {"Record": "v1 · TWAI 4/5 @ 250k"}),
+        ("folder", {"Record": "v? · TWAI 4/5 @ 250k", "Note": "v2 needs bundle ≥ 1.3.0"}),
+        ("v9", {"Record": "v? · TWAI 4/5 @ 250k", "Note": "v2 needs bundle ≥ 1.3.0"}),
+    ],
+)
+def test_odu_details_show_the_record_the_bundle_writes(
+    bundle: str, expected: dict[str, str], tmp_path: Path
+) -> None:
+    odu = next(t for t in SOLO_TARGETS if t.product == "SOLO ODU Controller")
+    fields = dict(target_fields(odu, _solo_bundle_settings(bundle, tmp_path), None))
+    assert {key: fields.get(key) for key in expected} == expected
+    assert fields["Layout"] == "node-4MB · 0x05 / 0x06"
+    if expected["Record"].startswith("v1"):
+        assert "I2C" not in fields and "Note" not in fields
+    if expected["Record"].startswith("v?"):
+        assert "Holds" not in fields and "I2C" not in fields
+
+
+def test_idu_details_keep_its_holds_when_the_bundle_cannot_say(tmp_path: Path) -> None:
+    idu = next(t for t in SOLO_TARGETS if t.product == "SOLO IDU Controller")
+    fields = dict(target_fields(idu, _solo_bundle_settings("folder", tmp_path), None))
+    assert (fields["Record"], fields["Holds"]) == ("v? · TWAI 6/7 @ 250k", "GPIO3 LOW")
+    assert "Note" not in fields
+
+
+def test_idu_details_show_its_one_hold_and_no_i2c() -> None:
+    idu = next(t for t in SOLO_TARGETS if t.product == "SOLO IDU Controller")
+    fields = dict(target_fields(idu, Settings(), None))
+    assert (fields["Record"], fields["Holds"]) == ("v1 · TWAI 6/7 @ 250k", "GPIO3 LOW")
+    assert "I2C" not in fields and "Note" not in fields
 
 
 def test_details_pane_hides_below_80_columns() -> None:

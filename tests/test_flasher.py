@@ -54,7 +54,9 @@ from esp_prog2_flasher.flasher import (
     load_solo_bundle,
     otadata_selecting_ota0,
     provision_node,
+    read_bundle_version,
     read_node_config,
+    release_tag_profile_version,
 )
 
 _PORT = "COM7"
@@ -244,6 +246,35 @@ def test_odu_plan_without_app(tmp_path: Path) -> None:
 )
 def test_bundle_version_picks_the_record_version(version: str, expected: int) -> None:
     assert bundle_profile_version(version) == expected
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("c-cpp-esp32-v1.2.1", 1),
+        ("c-cpp-esp32-v1.3.0", 2),
+        ("c-cpp-esp32-v2.0.0", 2),
+        ("v9", None),
+        ("", None),
+    ],
+)
+def test_release_tag_predicts_the_record_version(tag: str, expected: int | None) -> None:
+    assert release_tag_profile_version(tag) == expected
+
+
+def test_read_bundle_version_reads_the_manifest(tmp_path: Path) -> None:
+    assert read_bundle_version(_make_bundle(tmp_path / "b", _versioned("1.3.0"))) == "1.3.0"
+
+
+@pytest.mark.parametrize(
+    "manifest", [None, "{not json", '["list"]', '{"version": 13}', '{"format": 1}']
+)
+def test_read_bundle_version_without_a_readable_version_is_none(
+    tmp_path: Path, manifest: str | None
+) -> None:
+    if manifest is not None:
+        (tmp_path / "manifest.json").write_text(manifest, encoding="utf-8")
+    assert read_bundle_version(tmp_path) is None
 
 
 @pytest.mark.parametrize("product", ["SOLO ODU Controller", "SOLO IDU Controller"])
