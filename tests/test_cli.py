@@ -55,7 +55,11 @@ def test_read_node_config_prints_the_block_and_the_board_profile(
     cli._read_node_config("COM9")
     out = capsys.readouterr().out
     assert "Product:      SOLO ODU Controller" in out
-    assert "Board profile: TWAI tx GPIO4 rx GPIO5, 250 kbit/s, hold-LOW mask 0x0" in out
+    assert (
+        "Board profile: TWAI tx GPIO4 rx GPIO5, 250 kbit/s, hold-LOW mask 0x1800E00060046, "
+        "hold-HIGH mask 0x200000, I2C SDA GPIO8 SCL GPIO9 @ 0x2C: 0x30=0x00 0x40=0x00 "
+        "0x50=0x00 0x60=0x00 0x70=0x00"
+    ) in out
 
 
 def test_read_node_config_says_when_there_is_no_board_profile(

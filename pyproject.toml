@@ -1,6 +1,6 @@
 [project]
 name = "esp-prog2-flasher"
-version = "3.1.0"
+version = "3.2.0"
 description = "TUI/CLI flasher for the RA4M1 (UNO R4 Minima) bootloader/app and the PSoC 6 (IDU Radar) via an ESP-Prog-2 (CMSIS-DAP), and for SOLO ODU/IDU ESP32-S3 boards over USB"
 readme = "README.md"
 requires-python = ">=3.12"

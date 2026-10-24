@@ -98,7 +98,12 @@ The TUI is a keyboard-driven dashboard in the style of
   [Saved state](#saved-state)).
 - **Details** (right): the selection's settings (chip, image path, address or
   layout, USB names and CAN IDs, port, TWAI pins and bitrate, detect state,
-  last run), then the commands valid for it. Hidden below 80 columns.
+  last run), then the commands valid for it. Hidden below 80 columns. On a SOLO
+  row, `Record` names the board-profile record the selected bundle will write
+  (`v1`, `v2`, or `v?` with the note `v2 needs bundle ≥ 1.3.0` when a tag or
+  folder does not say), and `Holds`/`I2C` summarise that record, e.g.
+  `10 LOW · GPIO21 HIGH` and `0x2C: 5 writes`; the confirm summary and `/ r`
+  give the full masks.
 - **Status line**: `✓` success, `!` warning, `✗` error, cleared after a few
   seconds; a spinner while a job runs.
 - **Footer**: the keys for the current screen.
@@ -312,17 +317,22 @@ uv run esp-prog2-flasher --read-node-config --port COM7
 
 - `--provision-node` needs `--product` and takes `--manufacturer`,
   `--boot-cmd-id` and `--boot-reply-id` with the same rules as `--flash`. It
-  writes the block, reads it back and fails if any byte differs.
+  writes the block, reads it back and fails if any byte differs. For a SOLO
+  product it writes the preset's whole `cancfg` (block plus board-profile
+  record): the record goes in as v2 only when the node already holds a valid v2
+  record, otherwise as v1 (see [SOLO boards](#solo-boards-esp32-s3)).
 - The `cancfg` offset comes from the node's partition table at `0x8000`.
   With no valid table there (e.g. blank flash) it falls back to `0x11000`. A
   valid table without a `cancfg` partition is an error, because the node
   firmware would never read a block written anywhere else.
 - `--read-node-config` prints the manufacturer, product and CAN IDs, or
   `unprovisioned/invalid (node uses defaults 0x79E/0x79F)`. It also reads the
-  24-byte board-profile record at `cancfg + 0x50` in the same flash read and prints
+  board-profile record (v1 or v2) at `cancfg + 0x50` in the same flash read and prints
   `Board profile: TWAI tx GPIO4 rx GPIO5, 250 kbit/s, hold-LOW mask 0x0`, or
   `Board profile: no board profile (updater defaults: TWAI tx GPIO4 rx GPIO5, 250 kbit/s, hold-LOW mask 0x0)`
-  when the record is absent or invalid. The TUI's `/ r` shows the same.
+  when the record is absent or invalid. A v2 record adds its hold-HIGH mask and
+  I2C safe writes when it has them, e.g. `..., hold-HIGH mask 0x200000, I2C SDA
+  GPIO8 SCL GPIO9 @ 0x2C: 0x30=0x00 0x40=0x00 ...`. The TUI's `/ r` shows the same.
 
 ## SOLO boards (ESP32-S3)
 
@@ -333,21 +343,50 @@ board, a partition table per flash layout, `manifest.json`) plus the board's
 `cancfg`. `--port` is required and never auto-detected.
 
 `cancfg` (`0x11000`, 4 KB) holds the 80-byte v2 device config block (name and
-CAN ID pair), then at `+0x50` a 24-byte **board-profile record** (TWAI TX/RX
-GPIOs, CAN bitrate, GPIOs to hold LOW at boot), then `0xFF`. Older readers
-only read the first 80 bytes. If the record is missing or invalid, the updater
-falls back to TX 4, RX 5, 250 kbit/s and no holds.
+CAN ID pair), then at `+0x50` a **board-profile record**, then `0xFF`. Older
+readers only read the first 80 bytes. If the record is missing or invalid, the
+updater falls back to TX 4, RX 5, 250 kbit/s and no holds. The record comes in
+two versions, both shared byte-for-byte with the Embedded-CAN-Bootloaders
+bootloader and updater:
 
-| Board | Preset (`--product`) | Layout | Flash | TWAI TX/RX | Bitrate | Hold LOW | CAN IDs |
-|---|---|---|---|---|---|---|---|
-| `odu` | `SOLO ODU Controller` | `node-4MB` | 4 MB | 4 / 5 | 250k | none | `0x05`/`0x06` |
-| `idu` | `SOLO IDU Controller` | `idu-16MB` | 16 MB | 6 / 7 | 250k | GPIO3 | `0x07`/`0x08` |
+- **v1** (24 bytes): TWAI TX/RX GPIOs, CAN bitrate, and a mask of GPIOs to
+  drive LOW at boot. Every bundle reads it.
+- **v2** (56 bytes, same magic): v1's fields, plus a mask of GPIOs to drive
+  HIGH at boot and up to 8 register writes to one I2C device (SDA, SCL, 7-bit
+  address), all done by the bootloader as early as possible and kept through
+  resets and updater sessions. Only bundles from **c-cpp-esp32-v1.3.0** on
+  read it. An older one rejects it and falls back to the defaults above, which
+  would leave a board on other TWAI pins (the IDU) off the bus.
+
+So `--flash-solo` reads the bundle's `manifest.json` version and writes v2
+only for 1.3.0 or later (a `git describe` snapshot such as `1.2.1-4-g…`
+counts as its last release, 1.2.1). With an older bundle it writes the
+preset's v1 record and logs `Board-profile record v1`. For the ODU it also
+logs a warning that the early holds and fan-off writes need bundle 1.3.0.
+`/ n` and `--provision-node` cannot tell which bundle a board runs, so they
+write v2 only over a valid v2 record already on the board, and v1 otherwise.
+
+| Board | Preset (`--product`) | Layout | Flash | TWAI TX/RX | Bitrate | CAN IDs |
+|---|---|---|---|---|---|---|
+| `odu` | `SOLO ODU Controller` | `node-4MB` | 4 MB | 4 / 5 | 250k | `0x05`/`0x06` |
+| `idu` | `SOLO IDU Controller` | `idu-16MB` | 16 MB | 6 / 7 | 250k | `0x07`/`0x08` |
+
+What each preset holds and writes at boot:
+
+| Board | Record v2 (bundle 1.3.0 and later) | Record v1 (older bundles) |
+|---|---|---|
+| `odu` | LOW: GPIO 1, 2 (reversing valve), 17, 18 (relays), 6 (fan 6 PWM), 33, 34, 35, 47, 48 (EXV SM0, DIR, STEP, SM1, RESET). HIGH: GPIO 21 (EXV nENBL, active low). I2C SDA 8 / SCL 9, EMC2305 at `0x2C`: Fan 1–5 Setting (`0x30`, `0x40`, `0x50`, `0x60`, `0x70`) = `0x00`, which also turns off the chip's 4 s power-up watchdog that would run every fan at full speed | no holds, no I2C writes (unchanged from earlier releases) |
+| `idu` | LOW: GPIO 3. No HIGH holds, no I2C writes | the same |
+
+The ODU's levels are the ones its app sets first thing in `setup()`
+(Airform-SOLO-ODU-Controller `src/main.cpp`); the record makes the bootloader
+apply them before the app runs.
 
 ```sh
-# Fetch the bundle from the default release (c-cpp-esp32-v1.2.1) with gh, then flash.
+# Fetch the bundle from the default release (c-cpp-esp32-v1.3.0) with gh, then flash.
 uv run esp-prog2-flasher --flash-solo odu --port COM7
 # Use an unzipped bundle on disk, or another release.
-uv run esp-prog2-flasher --flash-solo idu --port COM8 --bundle path/to/esp32s3-can-updater-1.2.1
+uv run esp-prog2-flasher --flash-solo idu --port COM8 --bundle path/to/esp32s3-can-updater-v1.3.0
 uv run esp-prog2-flasher --flash-solo idu --port COM8 --bundle-tag c-cpp-esp32-vX.Y.Z
 # Also install an app in ota_0; erase a stock Arduino layout's leftovers first.
 uv run esp-prog2-flasher --flash-solo odu --port COM7 --bundle bundle/ --app firmware.bin --migrate-stock
@@ -361,7 +400,8 @@ Flash sequence, each step one esptool run:
 2. One `write-flash --flash-mode dio --flash-freq 80m --flash-size <layout>`:
    bootloader at `0x0`, the layout's partition table at `0x8000`, blank
    otadata at `0xE000`, the CAN updater at the layout's `factory` offset
-   (`0x20000` on node-4MB, `0xFA0000` on idu-16MB), and `cancfg` at `0x11000`.
+   (`0x20000` on node-4MB, `0xFA0000` on idu-16MB), and `cancfg` at `0x11000`
+   (board-profile record v2 or v1, picked from the bundle's version as above).
 3. Read `cancfg` back and fail if any byte differs.
 4. With `--app`: write it at the layout's `ota_0` (`0x80000` on node-4MB,
    `0x20000` on idu-16MB) plus an otadata image selecting `ota_0`. Without
@@ -380,6 +420,12 @@ first runs.
 - `--bundle-tag` needs the [GitHub CLI](https://cli.github.com/) (`gh auth
   login`). A tag that is not published yet fails with a clear "not found"
   error; pass `--bundle` instead.
+- The default release is `c-cpp-esp32-v1.3.0` (`DEFAULT_SOLO_BUNDLE_TAG` in
+  `flasher.py`). `--bundle-tag c-cpp-esp32-v1.2.1` still installs the older
+  bundle; the tool then writes record v1, so the ODU gets no early holds or
+  fan-off writes. A board's app must use `can-update-esp32` v1.3.0 or later
+  before it runs over a v2 record: older app helpers reject v2 and fall back
+  to TWAI 4/5.
 - **TUI:** each preset is a row under *SOLO boards · USB*; `enter` on it does the
   same. The wizard asks for the board's own port (picked from the detected ports,
   where the ESP-Prog-2's bridge port is marked as not a SOLO board, or typed) and

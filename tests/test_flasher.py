@@ -7,8 +7,9 @@ load_solo_bundle against a synthetic bundle and every manifest rule; pins the ot
 image to the CRC verified on the SOLO bench; and drives fetch_solo_bundle with a fake gh.
 
 Covers:       flash_solo (both presets, migrate-stock erase, app + otadata, --after modes,
-              read-back mismatch, esptool failure, validation before any esptool call),
-              provision_node with and without a profile, load_solo_bundle,
+              read-back mismatch, esptool failure, validation before any esptool call, the
+              record version a bundle gets), bundle_profile_version, provision_node with and
+              without a profile (v1, or v2 over a v2 record), read_node_config, load_solo_bundle,
               otadata_selecting_ota0, fetch_solo_bundle (success, missing release, missing gh,
               no asset).
 Not covered:  real esptool runs against a board, the real gh download, the pyOCD paths.
@@ -31,9 +32,10 @@ import pytest
 from esp_prog2_flasher import flasher
 from esp_prog2_flasher.board_profile import (
     CANCFG_IMAGE_SIZE,
+    PROFILE_RECORD_MAX_SIZE,
     PROFILE_RECORD_OFFSET,
-    PROFILE_RECORD_SIZE,
     SOLO_PROFILES,
+    ProfileVersion,
     build_cancfg_image,
 )
 from esp_prog2_flasher.dfu_config import DEFAULT_MANUFACTURER, InvalidNameError
@@ -46,12 +48,15 @@ from esp_prog2_flasher.flasher import (
     LogCallback,
     ProgressCallback,
     _esptool_command,
+    bundle_profile_version,
     fetch_solo_bundle,
     flash_solo,
     load_solo_bundle,
     otadata_selecting_ota0,
     provision_node,
+    read_bundle_version,
     read_node_config,
+    release_tag_profile_version,
 )
 
 _PORT = "COM7"
@@ -100,6 +105,10 @@ _BUNDLE_FILES = {
     "partition-table-node-4MB.bin": b"\xaa\x50node",
     "partition-table-idu-16MB.bin": b"\xaa\x50idu",
 }
+
+
+def _versioned(version: str) -> dict[str, object]:
+    return {**_MANIFEST, "version": version}
 
 
 def _make_bundle(root: Path, manifest: dict[str, object] | None = None) -> Path:
@@ -199,9 +208,10 @@ def _write_bundle(flash_size: str, table: str, factory: str) -> list[str]:
     ]
 
 
-def _golden_cancfg(product: str) -> bytes:
+def _golden_cancfg(product: str, version: ProfileVersion = 1) -> bytes:
     profile = SOLO_PROFILES[product]
-    return build_cancfg_image(profile.config_block(DEFAULT_MANUFACTURER), profile.record)
+    block = profile.config_block(DEFAULT_MANUFACTURER)
+    return build_cancfg_image(block, profile.record_for(version), version)
 
 
 def test_odu_plan_without_app(tmp_path: Path) -> None:
@@ -214,6 +224,87 @@ def test_odu_plan_without_app(tmp_path: Path) -> None:
     ]
     assert fake.flash[0x11000] == _golden_cancfg("SOLO ODU Controller")
     assert fake.flash[0xE000] == _BUNDLE_FILES["ota_data_initial.bin"]
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("1.2.0", 1),
+        ("1.2.1", 1),
+        ("1.2.1-4-gabc1234-dirty", 1),
+        ("0.9.9", 1),
+        ("1.3.0", 2),
+        ("v1.3.0", 2),
+        ("1.3.0-2-gabc1234", 2),
+        ("1.3.1", 2),
+        ("1.10.0", 2),
+        ("2.0.0", 2),
+        ("1.3", 1),
+        ("", 1),
+        ("snapshot", 1),
+    ],
+)
+def test_bundle_version_picks_the_record_version(version: str, expected: int) -> None:
+    assert bundle_profile_version(version) == expected
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("c-cpp-esp32-v1.2.1", 1),
+        ("c-cpp-esp32-v1.3.0", 2),
+        ("c-cpp-esp32-v2.0.0", 2),
+        ("v9", None),
+        ("", None),
+    ],
+)
+def test_release_tag_predicts_the_record_version(tag: str, expected: int | None) -> None:
+    assert release_tag_profile_version(tag) == expected
+
+
+def test_read_bundle_version_reads_the_manifest(tmp_path: Path) -> None:
+    assert read_bundle_version(_make_bundle(tmp_path / "b", _versioned("1.3.0"))) == "1.3.0"
+
+
+@pytest.mark.parametrize(
+    "manifest", [None, "{not json", '["list"]', '{"version": 13}', '{"format": 1}']
+)
+def test_read_bundle_version_without_a_readable_version_is_none(
+    tmp_path: Path, manifest: str | None
+) -> None:
+    if manifest is not None:
+        (tmp_path / "manifest.json").write_text(manifest, encoding="utf-8")
+    assert read_bundle_version(tmp_path) is None
+
+
+@pytest.mark.parametrize("product", ["SOLO ODU Controller", "SOLO IDU Controller"])
+def test_bundle_with_v2_support_gets_the_v2_record(tmp_path: Path, product: str) -> None:
+    fake = FakeEsptool()
+    logs: list[str] = []
+    bundle = _make_bundle(tmp_path / "b", _versioned("1.3.0"))
+    flash_solo(SOLO_PROFILES[product], _PORT, bundle, runner=fake, log=logs.append)
+    assert fake.flash[0x11000] == _golden_cancfg(product, 2)
+    assert "Board-profile record v2" in logs
+    assert not any("WARNING" in line for line in logs)
+
+
+def test_older_bundle_gets_todays_odu_record_and_a_warning(tmp_path: Path) -> None:
+    fake = FakeEsptool()
+    logs: list[str] = []
+    bundle = _make_bundle(tmp_path / "b", _versioned("1.2.1"))
+    flash_solo(_ODU, _PORT, bundle, runner=fake, log=logs.append)
+    assert fake.flash[0x11000] == _golden_cancfg("SOLO ODU Controller", 1)
+    assert "Board-profile record v1" in logs
+    assert any("WARNING: bundle 1.2.1 predates c-cpp-esp32-v1.3.0" in line for line in logs)
+
+
+def test_older_bundle_gets_the_idu_record_without_a_warning(tmp_path: Path) -> None:
+    fake = FakeEsptool()
+    logs: list[str] = []
+    bundle = _make_bundle(tmp_path / "b", _versioned("1.2.1"))
+    flash_solo(_IDU, _PORT, bundle, runner=fake, log=logs.append)
+    assert fake.flash[0x11000] == _golden_cancfg("SOLO IDU Controller", 1)
+    assert not any("WARNING" in line for line in logs)
 
 
 def test_idu_plan_with_migration_and_app(tmp_path: Path) -> None:
@@ -257,7 +348,7 @@ def test_odu_app_goes_to_its_own_ota_0(tmp_path: Path) -> None:
 def test_custom_manufacturer_lands_in_cancfg(tmp_path: Path) -> None:
     fake = FakeEsptool()
     flash_solo(_ODU, _PORT, _make_bundle(tmp_path / "b"), manufacturer="Acme", runner=fake)
-    assert fake.flash[0x11000] == build_cancfg_image(_ODU.config_block("Acme"), _ODU.record)
+    assert fake.flash[0x11000] == build_cancfg_image(_ODU.config_block("Acme"), _ODU.record_for(1))
 
 
 def test_readback_mismatch_fails_before_the_app(tmp_path: Path) -> None:
@@ -441,7 +532,35 @@ def test_provision_node_with_profile_writes_the_cancfg_image() -> None:
         _PORT, DEFAULT_MANUFACTURER, "SOLO IDU Controller", 0x07, 0x08, profile=_IDU, runner=fake
     )
     assert fake.flash[0x11000] == _golden_cancfg("SOLO IDU Controller")
+    assert [call[4] for call in fake.calls] == [
+        "read-flash",
+        "read-flash",
+        "write-flash",
+        "read-flash",
+    ]
+    assert fake.calls[1][-3:] == ["0x11000", str(0x50 + 56), "read.bin"]
     assert fake.calls[-1][-3:] == ["0x11000", "4096", "read.bin"]
+
+
+@pytest.mark.parametrize(("held", "written"), [(1, 1), (2, 2)])
+def test_provision_node_keeps_the_nodes_record_version(
+    held: ProfileVersion, written: ProfileVersion
+) -> None:
+    fake = FakeEsptool()
+    fake.flash[0x11000] = _golden_cancfg("SOLO ODU Controller", held)
+    logs: list[str] = []
+    provision_node(
+        _PORT,
+        DEFAULT_MANUFACTURER,
+        "SOLO ODU Controller",
+        0x05,
+        0x06,
+        profile=_ODU,
+        runner=fake,
+        log=logs.append,
+    )
+    assert fake.flash[0x11000] == _golden_cancfg("SOLO ODU Controller", written)
+    assert any(f"Writing board-profile record v{written}" in line for line in logs)
 
 
 def _stub_cancfg_read(monkeypatch: pytest.MonkeyPatch, image: bytes) -> list[int]:
@@ -461,9 +580,15 @@ def test_read_node_config_decodes_block_and_profile_in_one_read(
 ) -> None:
     sizes = _stub_cancfg_read(monkeypatch, _golden_cancfg("SOLO IDU Controller"))
     node = read_node_config(_PORT)
-    assert sizes == [PROFILE_RECORD_OFFSET + PROFILE_RECORD_SIZE]
+    assert sizes == [PROFILE_RECORD_OFFSET + PROFILE_RECORD_MAX_SIZE]
     assert node.config is not None and node.config.product == "SOLO IDU Controller"
     assert node.profile == _IDU.record
+
+
+def test_read_node_config_decodes_a_v2_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_cancfg_read(monkeypatch, _golden_cancfg("SOLO ODU Controller", 2))
+    node = read_node_config(_PORT)
+    assert node.profile == _ODU.record
 
 
 def test_read_node_config_reports_an_erased_partition_as_undecoded(

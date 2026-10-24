@@ -32,9 +32,13 @@ from .. import flasher
 from ..board_profile import (
     BITRATE_LABELS,
     CANCFG_IMAGE_SIZE,
+    PROFILE_VERSION_V1,
+    PROFILE_VERSION_V2,
     SOLO_PROFILES,
     Bitrate,
     BoardProfile,
+    ProfileRecord,
+    ProfileVersion,
     describe_profile_record,
 )
 from ..dfu_config import (
@@ -691,13 +695,42 @@ def solo_app_flow(settings: Settings) -> EditFlow:
 # ----- summaries and details -------------------------------------------------------------
 
 
-def _solo_config_rows(profile: BoardProfile, manufacturer: str) -> list[Field]:
-    record = profile.record
+_V2_MINIMUM: Final[str] = ".".join(str(part) for part in flasher.PROFILE_V2_MIN_BUNDLE_VERSION)
+_V2_MINIMUM_TEXT: Final[str] = f"v2 needs bundle ≥ {_V2_MINIMUM}"
+
+
+def _solo_record_version(bundle_dir: Path | str | None, tag: str) -> ProfileVersion | None:
+    """The record version a SOLO flash will write, or ``None`` when the bundle cannot say.
+
+    A folder answers from its manifest (as flash_solo will); a release from its tag.
+    """
+    if bundle_dir:
+        version = flasher.read_bundle_version(Path(bundle_dir))
+        return None if version is None else flasher.bundle_profile_version(version)
+    return flasher.release_tag_profile_version(tag or flasher.DEFAULT_SOLO_BUNDLE_TAG)
+
+
+def _solo_record(
+    profile: BoardProfile, version: ProfileVersion | None
+) -> tuple[ProfileRecord, str]:
+    """The record a flash writes (the v2 preset when unknown) and its version label."""
+    if version == PROFILE_VERSION_V2:
+        return profile.record, "v2"
+    if version == PROFILE_VERSION_V1:
+        record = profile.record_for(PROFILE_VERSION_V1)
+        return record, "v1" if record == profile.record else f"v1 ({_V2_MINIMUM_TEXT})"
+    return profile.record, _V2_MINIMUM_TEXT
+
+
+def _solo_config_rows(
+    profile: BoardProfile, manufacturer: str, record: ProfileRecord, record_label: str
+) -> list[Field]:
     return [
         ("Manufacturer", manufacturer),
         ("Product", profile.product),
         ("CAN IDs", can_ids_text(*profile.boot_ids)),
         ("Profile", describe_profile_record(record)),
+        ("Record", record_label),
     ]
 
 
@@ -773,7 +806,8 @@ def summary(job: Job) -> Confirm:
             ]
             if job.migrate_stock:
                 rows.append(("Erase first", f"{_migration_range()} (stock leftovers)"))
-            rows += _solo_config_rows(profile, job.manufacturer)
+            record, label = _solo_record(profile, _solo_record_version(job.bundle_dir, job.tag))
+            rows += _solo_config_rows(profile, job.manufacturer, record, label)
             return Confirm(f"Flash the {profile.product}", tuple(rows), "Flash")
         case SoloProvisionJob():
             rows = [
@@ -785,7 +819,12 @@ def summary(job: Job) -> Confirm:
                     "the node's partition table puts cancfg "
                     f"(else 0x{flasher.DEFAULT_CANCFG_OFFSET:X})",
                 ),
-                *_solo_config_rows(job.profile, job.manufacturer),
+                *_solo_config_rows(
+                    job.profile,
+                    job.manufacturer,
+                    job.profile.record,
+                    "v2 if the board already holds a v2 record, else v1",
+                ),
             ]
             return Confirm(f"Provision the {job.profile.product}", tuple(rows), "Provision")
         case SoloReadJob():
@@ -814,9 +853,19 @@ def _bitrate_short(bitrate: Bitrate) -> str:
     return BITRATE_LABELS[bitrate].replace(" kbit/s", "k").replace(" Mbit/s", "M")
 
 
-def _hold_low_text(mask: int) -> str:
-    gpios = [f"GPIO{bit}" for bit in range(mask.bit_length()) if mask >> bit & 1]
-    return ", ".join(gpios) or "none"
+def _holds_text(record: ProfileRecord) -> str:
+    """Held GPIOs in one pane line: ``none``, ``GPIO3 LOW`` or ``10 LOW · GPIO21 HIGH``.
+
+    The full masks are in the confirm summary's Profile row and in ``/ r``.
+    """
+    parts = []
+    for level, mask in (("LOW", record.hold_low_mask), ("HIGH", record.hold_high_mask)):
+        gpios = [bit for bit in range(mask.bit_length()) if mask >> bit & 1]
+        if len(gpios) == 1:
+            parts.append(f"GPIO{gpios[0]} {level}")
+        elif gpios:
+            parts.append(f"{len(gpios)} {level}")
+    return " · ".join(parts) or "none"
 
 
 def target_note(target: Target, settings: Settings, probe_firmware: Path | None) -> str:
@@ -866,25 +915,43 @@ def target_fields(target: Target, settings: Settings, probe_firmware: Path | Non
         ]
     if target.kind == "solo" and target.product is not None:
         profile = SOLO_PROFILES[target.product]
-        record = profile.record
+        version = _solo_record_version(settings.solo_bundle_dir, settings.solo_tag)
+        record, _ = _solo_record(profile, version)
         # Names only here: the confirm summary shows the full paths.
         bundle = (
             f"{Path(settings.solo_bundle_dir).name} (folder)"
             if settings.solo_bundle_dir
-            else f"release {settings.solo_tag}"
+            else settings.solo_tag
         )
         app = Path(settings.solo_app).name if settings.solo_app else "none"
         migrate = "on" if settings.solo_migrate else "off"
-        return [
+        holds = _holds_text(record)
+        if version == PROFILE_VERSION_V1 and record != profile.record:
+            holds += f" (v2 needs ≥ {_V2_MINIMUM})"
+        # Every row fits the 80x24 pane's 23-cell values on one line, the folder name aside:
+        # with the command list the pane has no line to spare. When the bundle cannot say
+        # which record it takes and the two differ, the note replaces the holds and I2C rows.
+        determined = version is not None or profile.record_for(PROFILE_VERSION_V1) == record
+        rows: list[Field] = [
             ("Board", profile.product),
             ("Port", settings.solo_port or "none — / p picks one"),
-            ("Layout", f"{profile.layout} ({profile.flash_size} flash)"),
-            ("CAN IDs", _id_pair(profile.boot_ids)),
+            ("Layout", f"{profile.layout} · {_id_pair(profile.boot_ids)}"),
             (
-                "TWAI",
-                f"{record.twai_tx_gpio}/{record.twai_rx_gpio} @ {_bitrate_short(record.bitrate)}, "
-                f"hold LOW {_hold_low_text(record.hold_low_mask)}",
+                "Record",
+                f"{f'v{version}' if version else 'v?'} · TWAI {record.twai_tx_gpio}/"
+                f"{record.twai_rx_gpio} @ {_bitrate_short(record.bitrate)}",
             ),
+        ]
+        if not determined:
+            rows.append(("Note", _V2_MINIMUM_TEXT))
+        else:
+            rows.append(("Holds", holds))
+            if record.i2c is not None:
+                count = len(record.i2c.writes)
+                writes = f"{count} write{'s' * (count > 1)}"
+                rows.append(("I2C", f"0x{record.i2c.addr7:02X}: {writes}"))
+        return [
+            *rows,
             ("Maker", settings.solo_manufacturer),
             ("Bundle", bundle),
             ("Options", f"app {app} · migrate {migrate}"),
