@@ -383,10 +383,10 @@ The ODU's levels are the ones its app sets first thing in `setup()`
 apply them before the app runs.
 
 ```sh
-# Fetch the bundle from the default release (c-cpp-esp32-v1.2.1) with gh, then flash.
+# Fetch the bundle from the default release (c-cpp-esp32-v1.3.0) with gh, then flash.
 uv run esp-prog2-flasher --flash-solo odu --port COM7
 # Use an unzipped bundle on disk, or another release.
-uv run esp-prog2-flasher --flash-solo idu --port COM8 --bundle path/to/esp32s3-can-updater-1.2.1
+uv run esp-prog2-flasher --flash-solo idu --port COM8 --bundle path/to/esp32s3-can-updater-v1.3.0
 uv run esp-prog2-flasher --flash-solo idu --port COM8 --bundle-tag c-cpp-esp32-vX.Y.Z
 # Also install an app in ota_0; erase a stock Arduino layout's leftovers first.
 uv run esp-prog2-flasher --flash-solo odu --port COM7 --bundle bundle/ --app firmware.bin --migrate-stock
@@ -420,10 +420,12 @@ first runs.
 - `--bundle-tag` needs the [GitHub CLI](https://cli.github.com/) (`gh auth
   login`). A tag that is not published yet fails with a clear "not found"
   error; pass `--bundle` instead.
-- The default release stays `c-cpp-esp32-v1.2.1` until `c-cpp-esp32-v1.3.0` is
-  published (`DEFAULT_SOLO_BUNDLE_TAG` in `flasher.py`). Until then, pass
-  `--bundle-tag c-cpp-esp32-v1.3.0` (or a 1.3.0 `--bundle`) to get the ODU's
-  record v2.
+- The default release is `c-cpp-esp32-v1.3.0` (`DEFAULT_SOLO_BUNDLE_TAG` in
+  `flasher.py`). `--bundle-tag c-cpp-esp32-v1.2.1` still installs the older
+  bundle; the tool then writes record v1, so the ODU gets no early holds or
+  fan-off writes. A board's app must use `can-update-esp32` v1.3.0 or later
+  before it runs over a v2 record: older app helpers reject v2 and fall back
+  to TWAI 4/5.
 - **TUI:** each preset is a row under *SOLO boards · USB*; `enter` on it does the
   same. The wizard asks for the board's own port (picked from the detected ports,
   where the ESP-Prog-2's bridge port is marked as not a SOLO board, or typed) and

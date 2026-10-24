@@ -218,7 +218,7 @@ def test_idu_details_keep_its_holds_when_the_bundle_cannot_say(tmp_path: Path) -
 def test_idu_details_show_its_one_hold_and_no_i2c() -> None:
     idu = next(t for t in SOLO_TARGETS if t.product == "SOLO IDU Controller")
     fields = dict(target_fields(idu, Settings(), None))
-    assert (fields["Record"], fields["Holds"]) == ("v1 · TWAI 6/7 @ 250k", "GPIO3 LOW")
+    assert (fields["Record"], fields["Holds"]) == ("v2 · TWAI 6/7 @ 250k", "GPIO3 LOW")
     assert "I2C" not in fields and "Note" not in fields
 
 
