@@ -1,6 +1,6 @@
 # ESP-Prog-2 Flasher
 
-A `uv`-run Python **TUI/CLI** (v3.1.0) for flashing Normal Corporation's boards. A
+A `uv`-run Python **TUI/CLI** (v3.3.0) for flashing Normal Corporation's boards. A
 keyboard-driven dashboard (or headless flags) covers four jobs:
 
 ![ESP-Prog-2 Flasher dashboard: filter, "/" commands, SOLO flash wizard, run view](docs/images/tui-demo.gif)
@@ -333,6 +333,29 @@ uv run esp-prog2-flasher --read-node-config --port COM7
   when the record is absent or invalid. A v2 record adds its hold-HIGH mask and
   I2C safe writes when it has them, e.g. `..., hold-HIGH mask 0x200000, I2C SDA
   GPIO8 SCL GPIO9 @ 0x2C: 0x30=0x00 0x40=0x00 ...`. The TUI's `/ r` shows the same.
+- Both keep the chip in download mode between esptool runs (`--after no-reset`)
+  and end with the same watchdog reset as `--flash-solo`, so the board reboots
+  into its firmware once, at the end.
+
+### Which port to pass
+
+A SOLO board has no DTR/RTS reset circuit, so esptool cannot reset it into ROM
+download mode by itself. Pass the port the board shows **while running its
+firmware**; `--provision-node`, `--read-node-config` and `--flash-solo` (and the
+TUI) then move it there themselves:
+
+- **Running app, or factory updater from `c-cpp-esp32-v1.2.1`:** its USB serial
+  is the MAC as bare hex digits (`94A990F0DB1C`). The tool opens the port at
+  1200 baud with DTR and RTS low and closes it; the firmware restarts into ROM
+  download mode, which comes back as a **new** port whose serial is the same
+  MAC with colons (`94:A9:90:F0:DB:1C`). The tool follows the board to that
+  port by its MAC (never by VID:PID alone), logs `COM71 -> ROM download port
+  COM63`, and runs every esptool step there.
+- **Already in ROM download mode** (serial with colons): used as given.
+- **Blank board, or an updater older than v1.2.1:** nothing answers the touch.
+  After 10 s the tool stops before esptool runs: hold **BOOT** while plugging
+  the board in (or resetting it), then rerun with the download-mode port,
+  which has a different COM number.
 
 ## SOLO boards (ESP32-S3)
 
@@ -340,7 +363,8 @@ uv run esp-prog2-flasher --read-node-config --port COM7
 port. It writes the Embedded-CAN-Bootloaders "one updater" release bundle
 (`esp32s3-can-updater-<version>.zip`: one bootloader and CAN updater for every
 board, a partition table per flash layout, `manifest.json`) plus the board's
-`cancfg`. `--port` is required and never auto-detected.
+`cancfg`. `--port` is required and never auto-detected; see
+[Which port to pass](#which-port-to-pass).
 
 `cancfg` (`0x11000`, 4 KB) holds the 80-byte v2 device config block (name and
 CAN ID pair), then at `+0x50` a **board-profile record**, then `0xFF`. Older

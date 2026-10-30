@@ -175,6 +175,9 @@ _DOWNLOAD_MODE_HINT: Final[str] = (
     "download-mode port; it has a different COM number."
 )
 
+# esptool 5's progress line: "Writing at 0x0002c88d [==>   ]  11.2% 16384/146216 bytes...".
+ESPTOOL_PROGRESS: Final[re.Pattern[str]] = re.compile(r"(\d+(?:\.\d+)?)% \d+/\d+ bytes")
+
 ProgressCallback = Callable[[float], None]
 LogCallback = Callable[[str], None]
 # Runs one esptool argv and returns its exit code. Injected so tests can capture the
@@ -856,7 +859,6 @@ def _run_esptool(
 
     Returns esptool's exit code; callers turn a non-zero code into their own error.
     """
-    percent = re.compile(r"\((\d+)\s*%\)")
     proc = subprocess.Popen(
         args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
     )
@@ -865,7 +867,7 @@ def _run_esptool(
         line = line.rstrip()
         if line and log:
             log(line)
-        match = percent.search(line)
+        match = ESPTOOL_PROGRESS.search(line)
         if match and progress:
             with contextlib.suppress(ValueError):
                 progress(float(match.group(1)))
