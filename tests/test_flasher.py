@@ -10,16 +10,22 @@ Covers:       flash_solo (both presets, migrate-stock erase, app + otadata, --af
               read-back mismatch, esptool failure, validation before any esptool call, the
               record version a bundle gets), bundle_profile_version, provision_node with and
               without a profile (v1, or v2 over a v2 record), read_node_config, the no-reset
-              steps plus final watchdog reset of both node paths, load_solo_bundle,
+              steps plus final watchdog reset of every node path, the 1200-baud touch through
+              the injected port/touch/clock seams (a running board followed by its MAC to its
+              ROM port for every esptool call, a ROM port never appearing failing before
+              esptool, an already-ROM, serial-less, non-MAC or unlisted port used as given),
+              the hold-BOOT guidance on an esptool failure, load_solo_bundle,
               otadata_selecting_ota0, fetch_solo_bundle (success, missing release, missing gh,
               no asset).
-Not covered:  real esptool runs against a board, the real gh download, the pyOCD paths.
+Not covered:  real esptool runs against a board, a real 1200-baud touch or port listing, the
+              real gh download, the pyOCD paths.
 See also:     src/esp_prog2_flasher/flasher.py, tests/test_board_profile.py
 """
 
 from __future__ import annotations
 
 import copy
+import functools
 import json
 import struct
 import subprocess
@@ -41,12 +47,18 @@ from esp_prog2_flasher.board_profile import (
 from esp_prog2_flasher.dfu_config import DEFAULT_MANUFACTURER, InvalidNameError
 from esp_prog2_flasher.flasher import (
     DEFAULT_BAUD_RATE,
+    ESP32S3_USB_JTAG_PID,
+    ESP_PROG_VID,
     NODE_CHIP,
+    NODE_ROM_PORT_TIMEOUT_S,
     BundleError,
+    DownloadModeEntry,
     FlasherError,
     FlashFailedError,
     LogCallback,
     ProgressCallback,
+    SerialPortInfo,
+    _enter_node_download_mode,
     _esptool_command,
     bundle_profile_version,
     fetch_solo_bundle,
@@ -170,6 +182,10 @@ class FakeEsptool:
             self.flash[int(offset, 16)] = Path(path).read_bytes()
 
 
+def _port_as_is(port: str, _log: LogCallback | None) -> str:
+    return port
+
+
 def _conn(after: str) -> list[str]:
     return ["--port", _PORT, "--baud", str(DEFAULT_BAUD_RATE), "--after", after]
 
@@ -216,7 +232,9 @@ def _golden_cancfg(product: str, version: ProfileVersion = 1) -> bytes:
 
 def test_odu_plan_without_app(tmp_path: Path) -> None:
     fake = FakeEsptool()
-    flash_solo(_ODU, _PORT, _make_bundle(tmp_path / "bundle"), runner=fake)
+    flash_solo(
+        _ODU, _PORT, _make_bundle(tmp_path / "bundle"), enter_download_mode=_port_as_is, runner=fake
+    )
     assert fake.calls == [
         _write_bundle("4MB", "partition-table-node-4MB.bin", "0x20000"),
         [*_conn("no-reset"), "read-flash", "0x11000", "4096", "read.bin"],
@@ -282,7 +300,14 @@ def test_bundle_with_v2_support_gets_the_v2_record(tmp_path: Path, product: str)
     fake = FakeEsptool()
     logs: list[str] = []
     bundle = _make_bundle(tmp_path / "b", _versioned("1.3.0"))
-    flash_solo(SOLO_PROFILES[product], _PORT, bundle, runner=fake, log=logs.append)
+    flash_solo(
+        SOLO_PROFILES[product],
+        _PORT,
+        bundle,
+        enter_download_mode=_port_as_is,
+        runner=fake,
+        log=logs.append,
+    )
     assert fake.flash[0x11000] == _golden_cancfg(product, 2)
     assert "Board-profile record v2" in logs
     assert not any("WARNING" in line for line in logs)
@@ -292,7 +317,7 @@ def test_older_bundle_gets_todays_odu_record_and_a_warning(tmp_path: Path) -> No
     fake = FakeEsptool()
     logs: list[str] = []
     bundle = _make_bundle(tmp_path / "b", _versioned("1.2.1"))
-    flash_solo(_ODU, _PORT, bundle, runner=fake, log=logs.append)
+    flash_solo(_ODU, _PORT, bundle, enter_download_mode=_port_as_is, runner=fake, log=logs.append)
     assert fake.flash[0x11000] == _golden_cancfg("SOLO ODU Controller", 1)
     assert "Board-profile record v1" in logs
     assert any("WARNING: bundle 1.2.1 predates c-cpp-esp32-v1.3.0" in line for line in logs)
@@ -302,7 +327,7 @@ def test_older_bundle_gets_the_idu_record_without_a_warning(tmp_path: Path) -> N
     fake = FakeEsptool()
     logs: list[str] = []
     bundle = _make_bundle(tmp_path / "b", _versioned("1.2.1"))
-    flash_solo(_IDU, _PORT, bundle, runner=fake, log=logs.append)
+    flash_solo(_IDU, _PORT, bundle, enter_download_mode=_port_as_is, runner=fake, log=logs.append)
     assert fake.flash[0x11000] == _golden_cancfg("SOLO IDU Controller", 1)
     assert not any("WARNING" in line for line in logs)
 
@@ -311,7 +336,13 @@ def test_idu_plan_with_migration_and_app(tmp_path: Path) -> None:
     fake = FakeEsptool()
     app = _app(tmp_path)
     flash_solo(
-        _IDU, _PORT, _make_bundle(tmp_path / "bundle"), app=app, migrate_stock=True, runner=fake
+        _IDU,
+        _PORT,
+        _make_bundle(tmp_path / "bundle"),
+        app=app,
+        migrate_stock=True,
+        enter_download_mode=_port_as_is,
+        runner=fake,
     )
     assert fake.calls == [
         [*_conn("no-reset"), "erase-region", "0x10000", "0x10000"],
@@ -335,7 +366,14 @@ def test_idu_plan_with_migration_and_app(tmp_path: Path) -> None:
 
 def test_odu_app_goes_to_its_own_ota_0(tmp_path: Path) -> None:
     fake = FakeEsptool()
-    flash_solo(_ODU, _PORT, _make_bundle(tmp_path / "bundle"), app=_app(tmp_path), runner=fake)
+    flash_solo(
+        _ODU,
+        _PORT,
+        _make_bundle(tmp_path / "bundle"),
+        app=_app(tmp_path),
+        enter_download_mode=_port_as_is,
+        runner=fake,
+    )
     assert fake.calls[-2][-5:] == [
         "write-flash",
         "0x80000",
@@ -347,28 +385,51 @@ def test_odu_app_goes_to_its_own_ota_0(tmp_path: Path) -> None:
 
 def test_custom_manufacturer_lands_in_cancfg(tmp_path: Path) -> None:
     fake = FakeEsptool()
-    flash_solo(_ODU, _PORT, _make_bundle(tmp_path / "b"), manufacturer="Acme", runner=fake)
+    flash_solo(
+        _ODU,
+        _PORT,
+        _make_bundle(tmp_path / "b"),
+        manufacturer="Acme",
+        enter_download_mode=_port_as_is,
+        runner=fake,
+    )
     assert fake.flash[0x11000] == build_cancfg_image(_ODU.config_block("Acme"), _ODU.record_for(1))
 
 
 def test_readback_mismatch_fails_before_the_app(tmp_path: Path) -> None:
     fake = FakeEsptool(corrupt_reads=True)
     with pytest.raises(FlashFailedError, match=r"read-back mismatch at 0x11000.*\+0x0"):
-        flash_solo(_IDU, _PORT, _make_bundle(tmp_path / "b"), app=_app(tmp_path), runner=fake)
+        flash_solo(
+            _IDU,
+            _PORT,
+            _make_bundle(tmp_path / "b"),
+            app=_app(tmp_path),
+            enter_download_mode=_port_as_is,
+            runner=fake,
+        )
     assert [call[6] for call in fake.calls] == ["write-flash", "read-flash"]
 
 
 def test_esptool_failure_raises(tmp_path: Path) -> None:
     fake = FakeEsptool(returncode=2)
-    with pytest.raises(FlashFailedError, match="exited with code 2"):
-        flash_solo(_ODU, _PORT, _make_bundle(tmp_path / "b"), runner=fake)
+    with pytest.raises(FlashFailedError, match="exited with code 2.*Hold BOOT"):
+        flash_solo(
+            _ODU, _PORT, _make_bundle(tmp_path / "b"), enter_download_mode=_port_as_is, runner=fake
+        )
     assert len(fake.calls) == 1
 
 
 def test_failing_final_reset_does_not_fail_the_flash(tmp_path: Path) -> None:
     fake = FakeEsptool(reset_returncode=1)
     logs: list[str] = []
-    flash_solo(_ODU, _PORT, _make_bundle(tmp_path / "b"), runner=fake, log=logs.append)
+    flash_solo(
+        _ODU,
+        _PORT,
+        _make_bundle(tmp_path / "b"),
+        enter_download_mode=_port_as_is,
+        runner=fake,
+        log=logs.append,
+    )
     assert fake.calls[-1] == _RESET_COMMAND
     assert "board rebooted (the USB port re-enumerates)" in logs
 
@@ -376,7 +437,9 @@ def test_failing_final_reset_does_not_fail_the_flash(tmp_path: Path) -> None:
 def test_failing_write_still_fails_and_skips_the_reset(tmp_path: Path) -> None:
     fake = FakeEsptool(returncode=1, reset_returncode=1)
     with pytest.raises(FlashFailedError, match="exited with code 1"):
-        flash_solo(_ODU, _PORT, _make_bundle(tmp_path / "b"), runner=fake)
+        flash_solo(
+            _ODU, _PORT, _make_bundle(tmp_path / "b"), enter_download_mode=_port_as_is, runner=fake
+        )
     assert _RESET_COMMAND not in fake.calls
 
 
@@ -458,7 +521,7 @@ def test_bad_manifest_fails_before_esptool(
     fake = FakeEsptool()
     bundle = _make_bundle(tmp_path / "b", _mutated(mutate))
     with pytest.raises(BundleError, match=reason):
-        flash_solo(_ODU, _PORT, bundle, runner=fake)
+        flash_solo(_ODU, _PORT, bundle, enter_download_mode=_port_as_is, runner=fake)
     assert fake.calls == []
 
 
@@ -490,7 +553,12 @@ def test_non_esp_app_fails_before_esptool(tmp_path: Path) -> None:
     fake = FakeEsptool()
     with pytest.raises(FlasherError, match="not an ESP app image"):
         flash_solo(
-            _ODU, _PORT, _make_bundle(tmp_path / "b"), app=_app(tmp_path, b"PK"), runner=fake
+            _ODU,
+            _PORT,
+            _make_bundle(tmp_path / "b"),
+            app=_app(tmp_path, b"PK"),
+            enter_download_mode=_port_as_is,
+            runner=fake,
         )
     assert fake.calls == []
 
@@ -498,14 +566,28 @@ def test_non_esp_app_fails_before_esptool(tmp_path: Path) -> None:
 def test_missing_app_fails_before_esptool(tmp_path: Path) -> None:
     fake = FakeEsptool()
     with pytest.raises(FileNotFoundError):
-        flash_solo(_ODU, _PORT, _make_bundle(tmp_path / "b"), app=tmp_path / "x.bin", runner=fake)
+        flash_solo(
+            _ODU,
+            _PORT,
+            _make_bundle(tmp_path / "b"),
+            app=tmp_path / "x.bin",
+            enter_download_mode=_port_as_is,
+            runner=fake,
+        )
     assert fake.calls == []
 
 
 def test_bad_manufacturer_fails_before_esptool(tmp_path: Path) -> None:
     fake = FakeEsptool()
     with pytest.raises(InvalidNameError):
-        flash_solo(_ODU, _PORT, _make_bundle(tmp_path / "b"), manufacturer="café", runner=fake)
+        flash_solo(
+            _ODU,
+            _PORT,
+            _make_bundle(tmp_path / "b"),
+            manufacturer="café",
+            enter_download_mode=_port_as_is,
+            runner=fake,
+        )
     assert fake.calls == []
 
 
@@ -521,7 +603,15 @@ def test_otadata_selects_ota0_with_bench_crc() -> None:
 
 def test_provision_node_without_profile_writes_the_block_only() -> None:
     fake = FakeEsptool()
-    provision_node(_PORT, DEFAULT_MANUFACTURER, "SOLO ODU Controller", 0x05, 0x06, runner=fake)
+    provision_node(
+        _PORT,
+        DEFAULT_MANUFACTURER,
+        "SOLO ODU Controller",
+        0x05,
+        0x06,
+        enter_download_mode=_port_as_is,
+        runner=fake,
+    )
     assert fake.flash[0x11000] == _ODU.config_block(DEFAULT_MANUFACTURER)
     assert [call[6] for call in fake.calls[:-1]] == ["read-flash", "write-flash", "read-flash"]
 
@@ -529,7 +619,14 @@ def test_provision_node_without_profile_writes_the_block_only() -> None:
 def test_provision_node_with_profile_writes_the_cancfg_image() -> None:
     fake = FakeEsptool()
     provision_node(
-        _PORT, DEFAULT_MANUFACTURER, "SOLO IDU Controller", 0x07, 0x08, profile=_IDU, runner=fake
+        _PORT,
+        DEFAULT_MANUFACTURER,
+        "SOLO IDU Controller",
+        0x07,
+        0x08,
+        profile=_IDU,
+        enter_download_mode=_port_as_is,
+        runner=fake,
     )
     assert fake.flash[0x11000] == _golden_cancfg("SOLO IDU Controller")
     assert [call[6] for call in fake.calls[:-1]] == [
@@ -556,6 +653,7 @@ def test_provision_node_keeps_the_nodes_record_version(
         0x05,
         0x06,
         profile=_ODU,
+        enter_download_mode=_port_as_is,
         runner=fake,
         log=logs.append,
     )
@@ -571,7 +669,7 @@ def _node_with_cancfg(image: bytes) -> FakeEsptool:
 
 def test_read_node_config_decodes_block_and_profile_in_one_read() -> None:
     fake = _node_with_cancfg(_golden_cancfg("SOLO IDU Controller"))
-    node = read_node_config(_PORT, runner=fake)
+    node = read_node_config(_PORT, enter_download_mode=_port_as_is, runner=fake)
     assert fake.calls[-2][-3:] == [
         "0x11000",
         str(PROFILE_RECORD_OFFSET + PROFILE_RECORD_MAX_SIZE),
@@ -583,47 +681,187 @@ def test_read_node_config_decodes_block_and_profile_in_one_read() -> None:
 
 def test_read_node_config_decodes_a_v2_profile() -> None:
     node = read_node_config(
-        _PORT, runner=_node_with_cancfg(_golden_cancfg("SOLO ODU Controller", 2))
+        _PORT,
+        enter_download_mode=_port_as_is,
+        runner=_node_with_cancfg(_golden_cancfg("SOLO ODU Controller", 2)),
     )
     assert node.profile == _ODU.record
 
 
 def test_read_node_config_reports_an_erased_partition_as_undecoded() -> None:
-    node = read_node_config(_PORT, runner=_node_with_cancfg(bytes([0xFF]) * CANCFG_IMAGE_SIZE))
+    node = read_node_config(
+        _PORT,
+        enter_download_mode=_port_as_is,
+        runner=_node_with_cancfg(bytes([0xFF]) * CANCFG_IMAGE_SIZE),
+    )
     assert node.config is None and node.profile is None
 
 
-def _run_read_node_config(fake: FakeEsptool) -> None:
-    read_node_config(_PORT, runner=fake)
+# Each node path, run on ``port`` with the given download-mode entry; tmp_path holds a bundle.
+NodeRun = Callable[[FakeEsptool, str, DownloadModeEntry, Path], None]
 
 
-def _run_provision_node_without_profile(fake: FakeEsptool) -> None:
-    provision_node(_PORT, DEFAULT_MANUFACTURER, "SOLO ODU Controller", 0x05, 0x06, runner=fake)
+def _run_read_node_config(
+    fake: FakeEsptool, port: str, entry: DownloadModeEntry, _tmp: Path
+) -> None:
+    read_node_config(port, enter_download_mode=entry, runner=fake)
 
 
-def _run_provision_node_with_profile(fake: FakeEsptool) -> None:
+def _run_provision_node_without_profile(
+    fake: FakeEsptool, port: str, entry: DownloadModeEntry, _tmp: Path
+) -> None:
     provision_node(
-        _PORT, DEFAULT_MANUFACTURER, "SOLO IDU Controller", 0x07, 0x08, profile=_IDU, runner=fake
+        port,
+        DEFAULT_MANUFACTURER,
+        "SOLO ODU Controller",
+        0x05,
+        0x06,
+        enter_download_mode=entry,
+        runner=fake,
     )
 
 
-@pytest.mark.parametrize(
+def _run_provision_node_with_profile(
+    fake: FakeEsptool, port: str, entry: DownloadModeEntry, _tmp: Path
+) -> None:
+    provision_node(
+        port,
+        DEFAULT_MANUFACTURER,
+        "SOLO IDU Controller",
+        0x07,
+        0x08,
+        profile=_IDU,
+        enter_download_mode=entry,
+        runner=fake,
+    )
+
+
+def _run_flash_solo(fake: FakeEsptool, port: str, entry: DownloadModeEntry, tmp: Path) -> None:
+    flash_solo(_ODU, port, _make_bundle(tmp / "bundle"), enter_download_mode=entry, runner=fake)
+
+
+_NODE_RUNS = pytest.mark.parametrize(
     "run",
     [
         _run_read_node_config,
         _run_provision_node_without_profile,
         _run_provision_node_with_profile,
+        _run_flash_solo,
     ],
 )
+
+
+@_NODE_RUNS
 def test_node_calls_never_reset_until_the_final_watchdog_reset(
-    run: Callable[[FakeEsptool], None],
+    tmp_path: Path, run: NodeRun
 ) -> None:
     fake = FakeEsptool()
-    run(fake)
+    run(fake, _PORT, _port_as_is, tmp_path)
     *steps, last = fake.calls
     assert steps
     assert all(call[call.index("--after") + 1] == "no-reset" for call in steps)
     assert last == _RESET_COMMAND
+
+
+_APP_PORT = "COM71"
+_ROM_PORT = "COM63"
+_MAC = "94A990F0DB1C"
+_ROM_SERIAL = "94:A9:90:F0:DB:1C"
+_ROM_APPEARS_AT_S = 3.0
+
+
+def _usb_port(device: str, serial_number: str | None) -> SerialPortInfo:
+    return SerialPortInfo(device, "USB Serial", ESP_PROG_VID, ESP32S3_USB_JTAG_PID, serial_number)
+
+
+class FakePorts:
+    """The port-listing, 1200-baud-touch, sleep and clock seams of a board on USB.
+
+    ``listed`` is always there; ``rom`` joins it once the board was touched and the fake
+    clock reaches ``_ROM_APPEARS_AT_S``. Sleeping only advances the fake clock.
+    """
+
+    def __init__(self, listed: list[SerialPortInfo], rom: SerialPortInfo | None) -> None:
+        self.listed = listed
+        self.rom = rom
+        self.touched: list[str] = []
+        self.now = 0.0
+
+    def list_ports(self) -> list[SerialPortInfo]:
+        if self.rom is not None and self.touched and self.now >= _ROM_APPEARS_AT_S:
+            return [*self.listed, self.rom]
+        return list(self.listed)
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+    def clock(self) -> float:
+        return self.now
+
+    def entry(self) -> DownloadModeEntry:
+        return functools.partial(
+            _enter_node_download_mode,
+            list_ports=self.list_ports,
+            touch=self.touched.append,
+            sleep=self.sleep,
+            clock=self.clock,
+        )
+
+
+@_NODE_RUNS
+@pytest.mark.parametrize("rom_serial", [_ROM_SERIAL, _ROM_SERIAL.lower()])
+def test_running_board_is_touched_and_followed_to_its_rom_port(
+    tmp_path: Path, run: NodeRun, rom_serial: str
+) -> None:
+    ports = FakePorts([_usb_port(_APP_PORT, _MAC)], _usb_port(_ROM_PORT, rom_serial))
+    fake = FakeEsptool()
+    run(fake, _APP_PORT, ports.entry(), tmp_path)
+    assert ports.touched == [_APP_PORT]
+    assert fake.calls
+    assert all(call[call.index("--port") + 1] == _ROM_PORT for call in fake.calls)
+    assert fake.calls[-1][-1] == "chip-id"
+
+
+def test_switch_to_the_rom_port_is_logged() -> None:
+    ports = FakePorts([_usb_port(_APP_PORT, _MAC)], _usb_port(_ROM_PORT, _ROM_SERIAL))
+    logs: list[str] = []
+    assert ports.entry()(_APP_PORT, logs.append) == _ROM_PORT
+    assert f"{_APP_PORT} -> ROM download port {_ROM_PORT}" in logs
+
+
+@_NODE_RUNS
+def test_rom_port_never_appearing_fails_before_esptool(tmp_path: Path, run: NodeRun) -> None:
+    # Another board's ROM port is listed: a 303A:1001 port alone is never followed.
+    other_board = _usb_port("COM9", "AA:BB:CC:DD:EE:FF")
+    ports = FakePorts([_usb_port(_APP_PORT, _MAC), other_board], rom=None)
+    fake = FakeEsptool()
+    with pytest.raises(
+        FlashFailedError, match=r"Hold BOOT while plugging in or resetting.*different COM number"
+    ):
+        run(fake, _APP_PORT, ports.entry(), tmp_path)
+    assert ports.touched == [_APP_PORT]
+    assert fake.calls == []
+    assert NODE_ROM_PORT_TIMEOUT_S <= ports.now < NODE_ROM_PORT_TIMEOUT_S + 1
+
+
+@pytest.mark.parametrize(
+    "listed",
+    [
+        pytest.param([_usb_port(_PORT, _ROM_SERIAL)], id="already-rom-port"),
+        pytest.param([_usb_port(_PORT, None)], id="no-serial"),
+        pytest.param([_usb_port(_PORT, "A50285BI")], id="not-a-mac"),
+        pytest.param([_usb_port("COM9", _MAC)], id="port-not-listed"),
+    ],
+)
+def test_other_ports_are_used_as_given_without_a_touch(
+    tmp_path: Path, listed: list[SerialPortInfo]
+) -> None:
+    ports = FakePorts(listed, _usb_port(_ROM_PORT, _ROM_SERIAL))
+    fake = FakeEsptool()
+    _run_read_node_config(fake, _PORT, ports.entry(), tmp_path)
+    assert ports.touched == []
+    assert fake.calls
+    assert all(call[call.index("--port") + 1] == _PORT for call in fake.calls)
 
 
 def _fake_gh(
