@@ -1,15 +1,16 @@
 """Tests for flasher's SOLO path — the esptool command plan, bundle validation, otadata, fetch.
 
-Drives flash_solo and provision_node through an injected esptool runner that emulates the
-board's flash (writes land in a dict, reads come back from it), so the exact command plan,
-the bytes written and the read-back verification are checked without hardware; checks
-load_solo_bundle against a synthetic bundle and every manifest rule; pins the ota_0 otadata
+Drives flash_solo, provision_node and read_node_config through an injected esptool runner
+that emulates the board's flash (writes land in a dict, reads come back from it), so the exact
+command plan, the bytes written and the read-back verification are checked without hardware;
+checks load_solo_bundle against a synthetic bundle and every manifest rule; pins the ota_0 otadata
 image to the CRC verified on the SOLO bench; and drives fetch_solo_bundle with a fake gh.
 
 Covers:       flash_solo (both presets, migrate-stock erase, app + otadata, --after modes,
               read-back mismatch, esptool failure, validation before any esptool call, the
               record version a bundle gets), bundle_profile_version, provision_node with and
-              without a profile (v1, or v2 over a v2 record), read_node_config, load_solo_bundle,
+              without a profile (v1, or v2 over a v2 record), read_node_config, the no-reset
+              steps plus final watchdog reset of both node paths, load_solo_bundle,
               otadata_selecting_ota0, fetch_solo_bundle (success, missing release, missing gh,
               no asset).
 Not covered:  real esptool runs against a board, the real gh download, the pyOCD paths.
@@ -29,7 +30,6 @@ from pathlib import Path
 
 import pytest
 
-from esp_prog2_flasher import flasher
 from esp_prog2_flasher.board_profile import (
     CANCFG_IMAGE_SIZE,
     PROFILE_RECORD_MAX_SIZE,
@@ -523,7 +523,7 @@ def test_provision_node_without_profile_writes_the_block_only() -> None:
     fake = FakeEsptool()
     provision_node(_PORT, DEFAULT_MANUFACTURER, "SOLO ODU Controller", 0x05, 0x06, runner=fake)
     assert fake.flash[0x11000] == _ODU.config_block(DEFAULT_MANUFACTURER)
-    assert [call[4] for call in fake.calls] == ["read-flash", "write-flash", "read-flash"]
+    assert [call[6] for call in fake.calls[:-1]] == ["read-flash", "write-flash", "read-flash"]
 
 
 def test_provision_node_with_profile_writes_the_cancfg_image() -> None:
@@ -532,14 +532,14 @@ def test_provision_node_with_profile_writes_the_cancfg_image() -> None:
         _PORT, DEFAULT_MANUFACTURER, "SOLO IDU Controller", 0x07, 0x08, profile=_IDU, runner=fake
     )
     assert fake.flash[0x11000] == _golden_cancfg("SOLO IDU Controller")
-    assert [call[4] for call in fake.calls] == [
+    assert [call[6] for call in fake.calls[:-1]] == [
         "read-flash",
         "read-flash",
         "write-flash",
         "read-flash",
     ]
     assert fake.calls[1][-3:] == ["0x11000", str(0x50 + 56), "read.bin"]
-    assert fake.calls[-1][-3:] == ["0x11000", "4096", "read.bin"]
+    assert fake.calls[-2][-3:] == ["0x11000", "4096", "read.bin"]
 
 
 @pytest.mark.parametrize(("held", "written"), [(1, 1), (2, 2)])
@@ -563,40 +563,67 @@ def test_provision_node_keeps_the_nodes_record_version(
     assert any(f"Writing board-profile record v{written}" in line for line in logs)
 
 
-def _stub_cancfg_read(monkeypatch: pytest.MonkeyPatch, image: bytes) -> list[int]:
-    sizes: list[int] = []
-
-    def fake_read(_port: str, _baud: int, _offset: int, size: int, *_a: object) -> bytes:
-        sizes.append(size)
-        return image[:size]
-
-    monkeypatch.setattr(flasher, "_node_cancfg_offset", lambda *_a, **_k: 0x11000)
-    monkeypatch.setattr(flasher, "_read_node_flash", fake_read)
-    return sizes
+def _node_with_cancfg(image: bytes) -> FakeEsptool:
+    fake = FakeEsptool()
+    fake.flash[0x11000] = image
+    return fake
 
 
-def test_read_node_config_decodes_block_and_profile_in_one_read(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sizes = _stub_cancfg_read(monkeypatch, _golden_cancfg("SOLO IDU Controller"))
-    node = read_node_config(_PORT)
-    assert sizes == [PROFILE_RECORD_OFFSET + PROFILE_RECORD_MAX_SIZE]
+def test_read_node_config_decodes_block_and_profile_in_one_read() -> None:
+    fake = _node_with_cancfg(_golden_cancfg("SOLO IDU Controller"))
+    node = read_node_config(_PORT, runner=fake)
+    assert fake.calls[-2][-3:] == [
+        "0x11000",
+        str(PROFILE_RECORD_OFFSET + PROFILE_RECORD_MAX_SIZE),
+        "read.bin",
+    ]
     assert node.config is not None and node.config.product == "SOLO IDU Controller"
     assert node.profile == _IDU.record
 
 
-def test_read_node_config_decodes_a_v2_profile(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_cancfg_read(monkeypatch, _golden_cancfg("SOLO ODU Controller", 2))
-    node = read_node_config(_PORT)
+def test_read_node_config_decodes_a_v2_profile() -> None:
+    node = read_node_config(
+        _PORT, runner=_node_with_cancfg(_golden_cancfg("SOLO ODU Controller", 2))
+    )
     assert node.profile == _ODU.record
 
 
-def test_read_node_config_reports_an_erased_partition_as_undecoded(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _stub_cancfg_read(monkeypatch, bytes([0xFF]) * CANCFG_IMAGE_SIZE)
-    node = read_node_config(_PORT)
+def test_read_node_config_reports_an_erased_partition_as_undecoded() -> None:
+    node = read_node_config(_PORT, runner=_node_with_cancfg(bytes([0xFF]) * CANCFG_IMAGE_SIZE))
     assert node.config is None and node.profile is None
+
+
+def _run_read_node_config(fake: FakeEsptool) -> None:
+    read_node_config(_PORT, runner=fake)
+
+
+def _run_provision_node_without_profile(fake: FakeEsptool) -> None:
+    provision_node(_PORT, DEFAULT_MANUFACTURER, "SOLO ODU Controller", 0x05, 0x06, runner=fake)
+
+
+def _run_provision_node_with_profile(fake: FakeEsptool) -> None:
+    provision_node(
+        _PORT, DEFAULT_MANUFACTURER, "SOLO IDU Controller", 0x07, 0x08, profile=_IDU, runner=fake
+    )
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        _run_read_node_config,
+        _run_provision_node_without_profile,
+        _run_provision_node_with_profile,
+    ],
+)
+def test_node_calls_never_reset_until_the_final_watchdog_reset(
+    run: Callable[[FakeEsptool], None],
+) -> None:
+    fake = FakeEsptool()
+    run(fake)
+    *steps, last = fake.calls
+    assert steps
+    assert all(call[call.index("--after") + 1] == "no-reset" for call in steps)
+    assert last == _RESET_COMMAND
 
 
 def _fake_gh(

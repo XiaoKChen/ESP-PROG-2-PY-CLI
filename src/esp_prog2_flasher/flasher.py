@@ -23,6 +23,8 @@ Not here:    DFU config-block encoding/decoding and the device table (dfu_config
              parsing (cli.py), the TUI (app.py).
 Invariants:  a node's config block is only written to the cancfg partition its partition table
              names; the fixed DEFAULT_CANCFG_OFFSET is used only when no valid table is found.
+             The node cancfg read and provision paths follow the same rule: no-reset steps,
+             then the watchdog-reset chip-id call.
              A SOLO flash validates the manifest, the app image and the cancfg image before its
              first esptool call; every esptool step but the last keeps the chip in download mode
              (--after no-reset); a separate final chip-id call reboots the board with
@@ -966,7 +968,9 @@ def _read_node_flash(
 def _node_cancfg_offset(
     port: str, baud: int, log: LogCallback | None, runner: EsptoolRunner = _run_esptool
 ) -> int:
-    table = _read_node_flash(port, baud, PARTITION_TABLE_OFFSET, PARTITION_TABLE_SIZE, log, runner)
+    table = _read_node_flash(
+        port, baud, PARTITION_TABLE_OFFSET, PARTITION_TABLE_SIZE, log, runner, after="no-reset"
+    )
     offset = cancfg_offset_from_table(table)
     if offset is None:
         offset = DEFAULT_CANCFG_OFFSET
@@ -1001,7 +1005,9 @@ def provision_node(
     and IDs still come from the arguments. The record is written as v2 only when the
     node already holds a valid v2 record (so its updater reads v2); otherwise as v1, since
     an older updater rejects v2 and falls back to its default TWAI pins. After writing,
-    everything written is read back and compared byte-for-byte.
+    everything written is read back and compared byte-for-byte. Every esptool step runs
+    with ``--after no-reset`` (a hard reset would drop the USB port mid-sequence); once
+    the read-back matches, a final watchdog-reset ``chip-id`` call reboots the board.
 
     Raises:
         InvalidNameError, InvalidCanIdError, InvalidProfileError: bad names/IDs or a
@@ -1027,7 +1033,13 @@ def provision_node(
     offset = _node_cancfg_offset(port, baud, log, runner)
     if profile is not None:
         current = _read_node_flash(
-            port, baud, offset, PROFILE_RECORD_OFFSET + PROFILE_RECORD_MAX_SIZE, log, runner
+            port,
+            baud,
+            offset,
+            PROFILE_RECORD_OFFSET + PROFILE_RECORD_MAX_SIZE,
+            log,
+            runner,
+            after="no-reset",
         )
         version = profile_record_version(current[PROFILE_RECORD_OFFSET:]) or PROFILE_VERSION_V1
         if log:
@@ -1047,9 +1059,10 @@ def provision_node(
             log,
             progress,
             runner,
+            after="no-reset",
         )
 
-    readback = _read_node_flash(port, baud, offset, len(block), log, runner)
+    readback = _read_node_flash(port, baud, offset, len(block), log, runner, after="no-reset")
     if readback != block:
         raise FlashFailedError(
             f"Node config read-back mismatch at 0x{offset:X}: "
@@ -1057,6 +1070,7 @@ def provision_node(
         )
     if log:
         log("Node config verified.")
+    _reboot_node_board(port, log, runner)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1068,13 +1082,18 @@ class NodeConfig:
 
 
 def read_node_config(
-    port: str, baud: int = DEFAULT_BAUD_RATE, log: LogCallback | None = None
+    port: str,
+    baud: int = DEFAULT_BAUD_RATE,
+    log: LogCallback | None = None,
+    runner: EsptoolRunner = _run_esptool,
 ) -> NodeConfig:
     """Read and decode the DFU config block and board-profile record of a node's cancfg partition.
 
     A ``None`` config means the block is unprovisioned or invalid — the node then
     uses its defaults (0x79E/0x79F, empty name). A ``None`` profile means the
     updater falls back to ``DEFAULT_PROFILE_RECORD``. Both parts come from one read.
+    Every esptool step runs with ``--after no-reset``; a final watchdog-reset
+    ``chip-id`` call then reboots the board.
 
     Raises:
         FlasherError: a valid partition table without a cancfg partition.
@@ -1083,10 +1102,17 @@ def read_node_config(
     from .board_profile import PROFILE_RECORD_MAX_SIZE, PROFILE_RECORD_OFFSET, parse_profile_record
     from .dfu_config import BLOCK_SIZE, parse_config_block
 
-    offset = _node_cancfg_offset(port, baud, log)
+    offset = _node_cancfg_offset(port, baud, log, runner)
     data = _read_node_flash(
-        port, baud, offset, PROFILE_RECORD_OFFSET + PROFILE_RECORD_MAX_SIZE, log
+        port,
+        baud,
+        offset,
+        PROFILE_RECORD_OFFSET + PROFILE_RECORD_MAX_SIZE,
+        log,
+        runner,
+        after="no-reset",
     )
+    _reboot_node_board(port, log, runner)
     return NodeConfig(
         parse_config_block(data[:BLOCK_SIZE]), parse_profile_record(data[PROFILE_RECORD_OFFSET:])
     )
