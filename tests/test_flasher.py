@@ -14,7 +14,8 @@ Covers:       flash_solo (both presets, migrate-stock erase, app + otadata, --af
               the injected port/touch/clock seams (a running board followed by its MAC to its
               ROM port for every esptool call, a ROM port never appearing failing before
               esptool, an already-ROM, serial-less, non-MAC or unlisted port used as given),
-              the hold-BOOT guidance on an esptool failure, load_solo_bundle,
+              the hold-BOOT guidance on an esptool failure, the esptool 5 progress lines that
+              drive the progress bar, load_solo_bundle,
               otadata_selecting_ota0, fetch_solo_bundle (success, missing release, missing gh,
               no asset).
 Not covered:  real esptool runs against a board, a real 1200-baud touch or port listing, the
@@ -49,6 +50,7 @@ from esp_prog2_flasher.flasher import (
     DEFAULT_BAUD_RATE,
     ESP32S3_USB_JTAG_PID,
     ESP_PROG_VID,
+    ESPTOOL_PROGRESS,
     NODE_CHIP,
     NODE_ROM_PORT_TIMEOUT_S,
     BundleError,
@@ -919,3 +921,35 @@ def test_fetch_reports_missing_gh(tmp_path: Path) -> None:
 def test_fetch_reports_no_asset(tmp_path: Path) -> None:
     with pytest.raises(BundleError, match="got 0"):
         fetch_solo_bundle("c-cpp-esp32-v1.2.1", tmp_path, run_gh=_fake_gh())
+
+
+@pytest.mark.parametrize(
+    ("line", "percent"),
+    [
+        ("Writing at 0x00020000 [                              ]   0.0% 0/146216 bytes...", 0.0),
+        (
+            "Writing at 0x0002c88d [==>                           ]  11.2% 16384/146216 bytes...",
+            11.2,
+        ),
+        (
+            "Writing at 0x00fe23b0 [==============================] 100.0% 146216/146216 bytes...",
+            100.0,
+        ),
+        ("Reading from 0x00011088 [==============================] 100.0% 136/136 bytes...", 100.0),
+    ],
+)
+def test_esptool_progress_reads_esptool_5_progress_lines(line: str, percent: float) -> None:
+    match = ESPTOOL_PROGRESS.search(line)
+    assert match is not None
+    assert float(match.group(1)) == percent
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Wrote 271280 bytes (146216 compressed) at 0x00020000 in 1.6 seconds (1352.7 kbit/s).",
+        "Hash of data verified.",
+    ],
+)
+def test_esptool_progress_ignores_other_esptool_lines(line: str) -> None:
+    assert ESPTOOL_PROGRESS.search(line) is None
