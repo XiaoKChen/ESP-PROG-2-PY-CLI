@@ -16,8 +16,9 @@ Owns:        probe VID/PID and target-type names, the serial-port classification
              and the node's partition-table offset/entry format, the cancfg partition identity
              and its fallback offset; the SOLO release bundle (repo, default tag, asset pattern,
              manifest format and its validation), which board-profile record version a bundle
-             reads (PROFILE_V2_MIN_BUNDLE_VERSION), the SOLO flash sequence, and the otadata
-             image that selects ota_0.
+             reads (PROFILE_V2_MIN_BUNDLE_VERSION), the SOLO flash sequence, the otadata
+             image that selects ota_0, and the 1200-baud touch that moves a running board
+             to its ROM download port (NODE_ROM_PORT_TIMEOUT_S, NODE_ROM_PORT_POLL_S).
 Not here:    DFU config-block encoding/decoding and the device table (dfu_config.py), the
              board-profile record, cancfg image and SOLO presets (board_profile.py), argument
              parsing (cli.py), the TUI (app.py).
@@ -25,6 +26,13 @@ Invariants:  a node's config block is only written to the cancfg partition its p
              names; the fixed DEFAULT_CANCFG_OFFSET is used only when no valid table is found.
              The node cancfg read and provision paths follow the same rule: no-reset steps,
              then the watchdog-reset chip-id call.
+             Before its first esptool call each node path (read, provision, SOLO flash)
+             checks the chosen port once: a USB serial of 12 bare hex digits is the board's
+             running firmware, so it gets a 1200-baud touch and every esptool call, the
+             final reset included, runs on the 303A:1001 port whose serial is the same MAC
+             with colons. The board is followed only by its own MAC, never by VID:PID; any
+             other port is used as given. If that ROM port does not appear in time, the
+             call fails before esptool runs, telling the user to hold BOOT.
              A SOLO flash validates the manifest, the app image and the cancfg image before its
              first esptool call; every esptool step but the last keeps the chip in download mode
              (--after no-reset); a separate final chip-id call reboots the board with
@@ -36,8 +44,9 @@ Invariants:  a node's config block is only written to the cancfg partition its p
              when the node already holds a valid v2 record; v1 everywhere else.
 Concurrency: calls block until hardware I/O finishes; progress and log callbacks fire on the
              calling thread, so the TUI runs these functions in worker threads.
-Errors:      FlasherError hierarchy (ProbeNotFoundError, FlashFailedError, BundleError for a
-             bad, missing or unfetchable SOLO bundle); FileNotFoundError for a missing image;
+Errors:      FlasherError hierarchy (ProbeNotFoundError; FlashFailedError, also when a running
+             board never reaches ROM download mode; BundleError for a bad, missing or
+             unfetchable SOLO bundle); FileNotFoundError for a missing image;
              InvalidNameError/InvalidCanIdError from dfu_config and InvalidProfileError from
              board_profile are raised before any hardware is touched.
 Depends on:  dfu_config.py, board_profile.py; pyocd, esptool, pyserial, intelhex and
@@ -150,6 +159,21 @@ _PARTITION_ENTRY_SIZE: Final[int] = struct.calcsize(_PARTITION_ENTRY_FORMAT)  # 
 _PARTITION_ENTRY_MAGIC: Final[bytes] = b"\xaa\x50"  # u16 0x50AA little-endian
 _PARTITION_MD5_MAGIC: Final[bytes] = b"\xeb\xeb"  # optional MD5 entry ends the table
 _PARTITION_END_MAGIC: Final[bytes] = b"\xff\xff"  # erased flash ends the table
+
+# A SOLO board running its app or updater (v1.2.1+) has no DTR/RTS reset circuit, so esptool
+# cannot reset it into ROM download mode; its firmware restarts into it on a 1200-baud touch.
+# The ROM port then re-enumerates under a new port name, which Windows can take several
+# seconds to install, so the wait is generous and the poll cheap.
+NODE_TOUCH_BAUD: Final[int] = 1200
+NODE_ROM_PORT_TIMEOUT_S: Final[float] = 10.0
+NODE_ROM_PORT_POLL_S: Final[float] = 0.5
+# The running firmware's USB serial is the MAC as 12 bare hex digits (94A990F0DB1C); the
+# ROM download port's is the same MAC with colons (94:A9:90:F0:DB:1C).
+_RUNNING_FIRMWARE_SERIAL: Final[re.Pattern[str]] = re.compile(r"[0-9A-Fa-f]{12}")
+_DOWNLOAD_MODE_HINT: Final[str] = (
+    "Hold BOOT while plugging in or resetting the board, then rerun with the new "
+    "download-mode port; it has a different COM number."
+)
 
 ProgressCallback = Callable[[float], None]
 LogCallback = Callable[[str], None]
@@ -705,12 +729,13 @@ def find_probe_firmware() -> Path | None:
 
 @dataclass(frozen=True, slots=True)
 class SerialPortInfo:
-    """One serial port as the OS lists it."""
+    """One serial port as the OS lists it; ``serial_number`` is its USB serial, if any."""
 
     device: str
     description: str
     vid: int | None
     pid: int | None
+    serial_number: str | None = None
 
     @property
     def is_esp_prog_bridge(self) -> bool:
@@ -728,7 +753,10 @@ def list_serial_ports() -> list[SerialPortInfo]:
     """List every serial port, sorted by device name, for picking a SOLO board's port."""
     from serial.tools import list_ports
 
-    ports = (SerialPortInfo(p.device, p.description, p.vid, p.pid) for p in list_ports.comports())
+    ports = (
+        SerialPortInfo(p.device, p.description, p.vid, p.pid, p.serial_number)
+        for p in list_ports.comports()
+    )
     return sorted(ports, key=lambda port: port.device)
 
 
@@ -908,6 +936,77 @@ def cancfg_offset_from_table(table: bytes) -> int | None:
     )
 
 
+PortLister = Callable[[], list[SerialPortInfo]]
+# Opens and closes a port at NODE_TOUCH_BAUD; _touch_1200_baud is the real one.
+PortTouch = Callable[[str], None]
+# Returns the port esptool should use for the board on the given port. Injected so tests
+# never list or touch real ports; _enter_node_download_mode is the real one.
+DownloadModeEntry = Callable[[str, LogCallback | None], str]
+
+
+def _touch_1200_baud(port: str) -> None:
+    """Open ``port`` at 1200 baud with DTR and RTS low, then close it."""
+    import serial
+
+    link = serial.Serial()
+    link.port = port
+    link.baudrate = NODE_TOUCH_BAUD
+    link.dtr = False
+    link.rts = False
+    try:
+        link.open()
+        link.close()
+    except (serial.SerialException, OSError):
+        # The board restarts while the port is open, so open or close failing is expected.
+        logger.debug("1200-baud touch on %s ended with an error", port, exc_info=True)
+
+
+def _enter_node_download_mode(
+    port: str,
+    log: LogCallback | None,
+    *,
+    list_ports: PortLister = list_serial_ports,
+    touch: PortTouch = _touch_1200_baud,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> str:
+    """Return the port esptool should use for the board on ``port``.
+
+    A port whose USB serial is a bare 12-hex-digit MAC is the board's running app or
+    updater: it gets a 1200-baud touch, and the board is followed, by that MAC only, to the
+    303A:1001 ROM download port whose serial is the same MAC with colons. Any other port
+    (already the ROM port, no serial, not a MAC, not listed) is returned unchanged.
+
+    Raises:
+        FlashFailedError: no matching ROM port appeared within NODE_ROM_PORT_TIMEOUT_S.
+    """
+    listed = next((info for info in list_ports() if info.device == port), None)
+    if listed is None or listed.serial_number is None:
+        return port
+    mac = listed.serial_number
+    if not _RUNNING_FIRMWARE_SERIAL.fullmatch(mac):
+        return port
+    rom_serial = ":".join(mac[i : i + 2] for i in range(0, len(mac), 2)).upper()
+    if log:
+        log(f"{port} is running firmware (USB serial {mac}); sending a 1200-baud touch")
+    touch(port)
+    deadline = clock() + NODE_ROM_PORT_TIMEOUT_S
+    while True:
+        for info in list_ports():
+            serial_number = (info.serial_number or "").upper()
+            if info.is_download_mode_candidate and serial_number == rom_serial:
+                if log:
+                    log(f"{port} -> ROM download port {info.device}")
+                return info.device
+        if clock() >= deadline:
+            raise FlashFailedError(
+                f"{port} did not restart into ROM download mode: no 303A:1001 port with USB "
+                f"serial {rom_serial} appeared within {NODE_ROM_PORT_TIMEOUT_S:g} s. "
+                f"{_DOWNLOAD_MODE_HINT}"
+            )
+        sleep(NODE_ROM_PORT_POLL_S)
+
+
 def _run_node_esptool(
     port: str,
     baud: int,
@@ -925,7 +1024,7 @@ def _run_node_esptool(
     if returncode != 0:
         raise FlashFailedError(
             f"esptool exited with code {returncode}. Is the node's ESP32-S3 connected on "
-            f"{port} and able to enter download mode?"
+            f"{port} and in download mode? {_DOWNLOAD_MODE_HINT}"
         )
 
 
@@ -996,6 +1095,7 @@ def provision_node(
     log: LogCallback | None = None,
     profile: BoardProfile | None = None,
     runner: EsptoolRunner = _run_esptool,
+    enter_download_mode: DownloadModeEntry = _enter_node_download_mode,
 ) -> None:
     """Write the DFU config block to an ESP32-S3 CAN node's cancfg partition and verify it.
 
@@ -1005,7 +1105,9 @@ def provision_node(
     and IDs still come from the arguments. The record is written as v2 only when the
     node already holds a valid v2 record (so its updater reads v2); otherwise as v1, since
     an older updater rejects v2 and falls back to its default TWAI pins. After writing,
-    everything written is read back and compared byte-for-byte. Every esptool step runs
+    everything written is read back and compared byte-for-byte. Before the first esptool
+    call, a board running its firmware is moved to its ROM download port
+    (_enter_node_download_mode), which every esptool call then uses. Every esptool step runs
     with ``--after no-reset`` (a hard reset would drop the USB port mid-sequence); once
     the read-back matches, a final watchdog-reset ``chip-id`` call reboots the board.
 
@@ -1013,7 +1115,8 @@ def provision_node(
         InvalidNameError, InvalidCanIdError, InvalidProfileError: bad names/IDs or a
             bad profile record, before any hardware I/O.
         FlasherError: a valid partition table without a cancfg partition.
-        FlashFailedError: esptool failed, or the read-back differs from the block.
+        FlashFailedError: the board did not reach download mode, esptool failed, or the
+            read-back differs from the block.
     """
     from .board_profile import (
         PROFILE_RECORD_MAX_SIZE,
@@ -1030,6 +1133,7 @@ def provision_node(
     if profile is not None:
         for candidate in (PROFILE_VERSION_V1, PROFILE_VERSION_V2):
             build_cancfg_image(block, profile.record_for(candidate), candidate)
+    port = enter_download_mode(port, log)
     offset = _node_cancfg_offset(port, baud, log, runner)
     if profile is not None:
         current = _read_node_flash(
@@ -1086,22 +1190,25 @@ def read_node_config(
     baud: int = DEFAULT_BAUD_RATE,
     log: LogCallback | None = None,
     runner: EsptoolRunner = _run_esptool,
+    enter_download_mode: DownloadModeEntry = _enter_node_download_mode,
 ) -> NodeConfig:
     """Read and decode the DFU config block and board-profile record of a node's cancfg partition.
 
     A ``None`` config means the block is unprovisioned or invalid — the node then
     uses its defaults (0x79E/0x79F, empty name). A ``None`` profile means the
     updater falls back to ``DEFAULT_PROFILE_RECORD``. Both parts come from one read.
-    Every esptool step runs with ``--after no-reset``; a final watchdog-reset
-    ``chip-id`` call then reboots the board.
+    A board running its firmware is first moved to its ROM download port
+    (_enter_node_download_mode). Every esptool step runs with ``--after no-reset``; a final
+    watchdog-reset ``chip-id`` call then reboots the board.
 
     Raises:
         FlasherError: a valid partition table without a cancfg partition.
-        FlashFailedError: esptool failed.
+        FlashFailedError: the board did not reach download mode, or esptool failed.
     """
     from .board_profile import PROFILE_RECORD_MAX_SIZE, PROFILE_RECORD_OFFSET, parse_profile_record
     from .dfu_config import BLOCK_SIZE, parse_config_block
 
+    port = enter_download_mode(port, log)
     offset = _node_cancfg_offset(port, baud, log, runner)
     data = _read_node_flash(
         port,
@@ -1395,6 +1502,7 @@ def flash_solo(
     progress: ProgressCallback | None = None,
     log: LogCallback | None = None,
     runner: EsptoolRunner = _run_esptool,
+    enter_download_mode: DownloadModeEntry = _enter_node_download_mode,
 ) -> None:
     """Flash a SOLO board from an unzipped release bundle, verify cancfg, then reset it.
 
@@ -1413,13 +1521,15 @@ def flash_solo(
 
     Every step runs with ``--after no-reset``; a final ``chip-id`` call then reboots the
     board with ``--after watchdog-reset`` and its exit code is ignored. Everything is
-    validated before the first esptool call.
+    validated before the first esptool call; then a board running its firmware is moved to
+    its ROM download port (_enter_node_download_mode), which every step uses.
 
     Raises:
         BundleError: the bundle is invalid or lacks the profile's layout.
         FileNotFoundError, FlasherError: ``app`` is missing or not an ESP image.
         InvalidNameError: ``manufacturer`` violates the block contract.
-        FlashFailedError: esptool failed, or the cancfg read-back differs.
+        FlashFailedError: the board did not reach download mode, esptool failed, or the
+            cancfg read-back differs.
     """
     from .board_profile import build_cancfg_image
 
@@ -1444,6 +1554,7 @@ def flash_solo(
         if log is not None:
             log(msg)
 
+    port = enter_download_mode(port, log)
     _log(f"Flashing {profile.product} ({profile.layout}, bundle {bundle.version}) on {port}")
     _log(f"Board-profile record v{record_version}")
     if record != profile.record:

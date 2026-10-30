@@ -202,7 +202,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Serial port for --flash-probe (default: auto-detect), or the board's port for "
         "--provision-node/--read-node-config/--flash-solo (required there, never "
-        "auto-detected).",
+        "auto-detected). A board running its firmware is restarted into ROM download mode "
+        "with a 1200-baud touch and followed to its new port; a blank board needs BOOT held "
+        "while plugging it in, then its download-mode port.",
     )
     p.add_argument(
         "--manufacturer",
