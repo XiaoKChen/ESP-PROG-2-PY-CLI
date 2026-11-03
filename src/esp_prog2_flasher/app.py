@@ -152,7 +152,7 @@ class FlasherApp(App[None]):
         if missing:
             self._startup_notice = (
                 "warn",
-                f"Saved path no longer exists, using the default: {', '.join(missing)}",
+                f"Saved path replaced with the default: {', '.join(missing)}",
             )
         return loaded.state.selected, loaded.state.collapsed
 

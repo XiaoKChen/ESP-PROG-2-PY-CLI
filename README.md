@@ -151,7 +151,10 @@ The TUI remembers its choices between launches in one JSON file per user:
 - **When:** written atomically after every edit, confirmed run or fold, and on
   quit. Headless flags never read or write it.
 - **Bad or moved files:** a saved path that no longer exists falls back to its
-  default (the bundled image, or empty) with one `!` status line. A corrupt file
+  default (the bundled image, or empty) with one `!` status line; so does a saved
+  `dfu_minima.hex`, the bootloader bundled before `bootloader-uno_r4.hex`. The
+  bundled images themselves are not saved as paths, so they always follow the
+  current build. A corrupt file
   is ignored with a `!` line and replaced on the next save. A file from a newer
   version, or in an unknown format, is ignored and never overwritten; `/ c`
   deletes it.

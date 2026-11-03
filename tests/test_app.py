@@ -883,7 +883,7 @@ def test_a_vanished_saved_path_falls_back_with_one_status(tmp_path: Path) -> Non
 
     async def check(app: FlasherApp, pilot: Pilot[None]) -> None:
         assert app.settings.app_bin == ""
-        assert status_text(app).startswith("! Saved path no longer exists")
+        assert status_text(app).startswith("! Saved path replaced with the default")
         assert "application .bin" in status_text(app)
 
     launch(state_file, check)
