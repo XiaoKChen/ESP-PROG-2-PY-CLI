@@ -224,6 +224,7 @@ In text fields every key, `/` included, is typed literally.
 ### Headless / scripting
 
 ```sh
+uv run esp-prog2-flasher --version          # print the version, exit
 uv run esp-prog2-flasher --list             # list connected probes + serial ports
 uv run esp-prog2-flasher --detect           # print probe+target status, exit
 uv run esp-prog2-flasher --flash            # flash the RA4M1 bootloader (bundled hex)

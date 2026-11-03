@@ -35,7 +35,7 @@ import tempfile
 from pathlib import Path
 from typing import Final
 
-from . import flasher
+from . import __version__, flasher
 from .board_profile import SOLO_PROFILES, describe_read_profile
 from .dfu_config import (
     DEFAULT_BOOT_CMD_ID,
@@ -79,6 +79,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "the ESP-Prog-2's own firmware. With "
         "no options, launches the interactive TUI.",
     )
+    p.add_argument("--version", action="version", version=f"esp-prog2-flasher {__version__}")
     p.add_argument(
         "--list", action="store_true", help="List connected probes and serial ports, then exit."
     )
