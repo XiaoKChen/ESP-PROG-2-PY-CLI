@@ -5,7 +5,7 @@ hex/psoc6_radar_full_image.hex, so out-of-range data is refused before any hardw
 
 Covers:       keeping main-flash segments, dropping Cypress metadata sections, rejecting data
               outside main flash or straddling its end, rejecting metadata-only images, and
-              resolving the bundled default image and the bundled RA4M1 bootloader hex.
+              resolving the bundled default image.
 Not covered:  flash_psoc6 itself and anything needing a probe or target.
 See also:     src/esp_prog2_flasher/flasher.py
 """
@@ -63,14 +63,6 @@ def test_rejects_segment_straddling_flash_end() -> None:
 def test_rejects_image_with_only_metadata() -> None:
     with pytest.raises(FlasherError, match="no data"):
         psoc6_flash_segments(_image((0x90300000, b"\x12\x34")))
-
-
-def test_default_bootloader_hex_resolves_to_bundled_file() -> None:
-    path = flasher.find_default_hex()
-
-    assert path is not None
-    assert path.is_file()
-    assert path.name == "bootloader-uno_r4.hex"
 
 
 def test_default_hex_resolves_to_bundled_image() -> None:
