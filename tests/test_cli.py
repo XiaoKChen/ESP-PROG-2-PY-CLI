@@ -1,7 +1,8 @@
 """Tests for cli — argument handling that decides what is written to a board.
 
-Covers:       --provision-node keeping a SOLO preset's board profile in the cancfg image, and
-              writing the v2 block alone for any other product.
+Covers:       --version printing the package version and exiting 0; --provision-node keeping a
+              SOLO preset's board profile in the cancfg image, and writing the v2 block alone
+              for any other product.
 Not covered:  argument parsing as a whole; esptool runs (tests/test_flasher.py).
 See also:     src/esp_prog2_flasher/cli.py, src/esp_prog2_flasher/board_profile.py
 """
@@ -13,9 +14,18 @@ from typing import Any
 
 import pytest
 
-from esp_prog2_flasher import cli, flasher
+from esp_prog2_flasher import __version__, cli, flasher
 from esp_prog2_flasher.board_profile import SOLO_PROFILES
 from esp_prog2_flasher.dfu_config import DEFAULT_MANUFACTURER, DfuConfig
+
+
+def test_version_prints_the_package_version_and_exits_0(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli._build_parser().parse_args(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out == f"esp-prog2-flasher {__version__}\n"
 
 
 def _provision(monkeypatch: pytest.MonkeyPatch, product: str) -> dict[str, Any]:

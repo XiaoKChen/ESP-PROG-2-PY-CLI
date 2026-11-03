@@ -35,7 +35,7 @@ import tempfile
 from pathlib import Path
 from typing import Final
 
-from . import flasher
+from . import __version__, flasher
 from .board_profile import SOLO_PROFILES, describe_read_profile
 from .dfu_config import (
     DEFAULT_BOOT_CMD_ID,
@@ -79,6 +79,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "the ESP-Prog-2's own firmware. With "
         "no options, launches the interactive TUI.",
     )
+    p.add_argument("--version", action="version", version=f"esp-prog2-flasher {__version__}")
     p.add_argument(
         "--list", action="store_true", help="List connected probes and serial ports, then exit."
     )
@@ -106,7 +107,10 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="BIN",
         help="Flash an application .bin to the RA4M1 target over SWD, then exit. Programs "
         "the application region only (never the bootloader) — flash the bootloader with "
-        "--flash first.",
+        "--flash first. At the default --app-address it also erases the bootloader's "
+        f"metadata block at 0x{flasher.RA4M1_METADATA_ADDRESS:X} so the bootloader boots the "
+        "new app; other addresses skip that erase (the image itself may still cover the "
+        "block).",
     )
     p.add_argument(
         "--app-address",

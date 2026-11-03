@@ -15,7 +15,8 @@ keyboard-driven dashboard (or headless flags) covers four jobs:
    (e.g. a PlatformIO/Arduino build) to the target's application region
    (`0x4000`) over SWD — the same image `pio run -t upload` sends over DFU, but
    pushed through the probe. It programs the application region only, leaving the
-   bootloader untouched.
+   bootloader untouched, and at `0x4000` also erases the bootloader's metadata
+   block (`0x3F800`) so the bootloader boots the new app.
 2. **Flash the PSoC 6 on the IDU Radar board** — writes the bundled full image
    (bootloader + App1, `hex/psoc6_radar_full_image.hex`) to the PSoC 62S3's main
    flash over SWD with pyOCD. See [PSoC 6 (IDU Radar)](#psoc-6-idu-radar).
@@ -224,6 +225,7 @@ In text fields every key, `/` included, is typed literally.
 ### Headless / scripting
 
 ```sh
+uv run esp-prog2-flasher --version          # print the version, exit
 uv run esp-prog2-flasher --list             # list connected probes + serial ports
 uv run esp-prog2-flasher --detect           # print probe+target status, exit
 uv run esp-prog2-flasher --flash            # flash the RA4M1 bootloader (bundled hex)
@@ -232,8 +234,8 @@ uv run esp-prog2-flasher --flash --product "IDU Controller"                 # al
 uv run esp-prog2-flasher --flash --product "IDU Controller" --manufacturer "Acme"
 uv run esp-prog2-flasher --flash --product "My Custom Board" --boot-cmd-id 0x700 --boot-reply-id 0x701
 
-uv run esp-prog2-flasher --flash-app path/to/firmware.bin        # flash an app .bin to the RA4M1 app region (0x4000)
-uv run esp-prog2-flasher --flash-app path/to/firmware.bin --app-address 0x4000   # override the base address
+uv run esp-prog2-flasher --flash-app path/to/firmware.bin        # flash an app .bin to the RA4M1 app region (0x4000), erase the metadata block at 0x3F800
+uv run esp-prog2-flasher --flash-app path/to/firmware.bin --app-address 0x8000   # override the base address; skips the 0x3F800 erase (the image may still cover it)
 
 uv run esp-prog2-flasher --detect --psoc6   # detect a PSoC 6 target (IDU Radar) instead of the RA4M1
 uv run esp-prog2-flasher --flash-psoc6      # flash the PSoC 6 with the bundled hex (bootloader + App1)
@@ -477,7 +479,13 @@ first runs.
    (`0x4000` by default, overridable) via pyOCD's `FileProgrammer`, then resets.
    A `.bin` carries no load address, so the base address is supplied explicitly;
    only the pages the image touches are sector-erased, so the bootloader region
-   below it is left intact.
+   below it is left intact. At the default `0x4000` it then erases the C
+   bootloader's metadata block (`0x3F800`–`0x3FFFF`: image record and update
+   marker), since a stale one makes the bootloader park in DFU instead of booting
+   the new app; the erase is skipped, with a warning, when the image itself reaches
+   `0x3F800`. Any other base address (e.g. Embassy's `0x8000`) skips that erase,
+   though an image there may still cover the block itself. The erase is refused
+   unless pyOCD's memory map puts the block in exactly one 2 KB flash sector.
 5. **Flash PSoC 6** — loads the `.hex`, keeps only the segments inside PSoC 6
    main flash (see [Safety](#psoc-6-idu-radar)), programs them against pyOCD's
    built-in `cy8c6xx5` target via `FlashLoader`, then resets.

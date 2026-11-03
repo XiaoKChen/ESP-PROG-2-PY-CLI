@@ -17,9 +17,11 @@ Covers:       flash_solo (both presets, migrate-stock erase, app + otadata, --af
               the hold-BOOT guidance on an esptool failure, the esptool 5 progress lines that
               drive the progress bar, load_solo_bundle,
               otadata_selecting_ota0, fetch_solo_bundle (success, missing release, missing gh,
-              no asset).
+              no asset), ra4m1_metadata_action, the RA4M1 app flash's decision to erase, skip
+              (the image covers it, at any base) or keep the bootloader's metadata block, and
+              _check_metadata_sector refusing a missing region or a sector other than 2 KB.
 Not covered:  real esptool runs against a board, a real 1200-baud touch or port listing, the
-              real gh download, the pyOCD paths.
+              real gh download, the pyOCD paths (the metadata erase itself included).
 See also:     src/esp_prog2_flasher/flasher.py, tests/test_board_profile.py
 """
 
@@ -34,6 +36,7 @@ import zipfile
 import zlib
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -47,19 +50,24 @@ from esp_prog2_flasher.board_profile import (
 )
 from esp_prog2_flasher.dfu_config import DEFAULT_MANUFACTURER, InvalidNameError
 from esp_prog2_flasher.flasher import (
+    APP_BASE_ADDRESS,
     DEFAULT_BAUD_RATE,
     ESP32S3_USB_JTAG_PID,
     ESP_PROG_VID,
     ESPTOOL_PROGRESS,
     NODE_CHIP,
     NODE_ROM_PORT_TIMEOUT_S,
+    RA4M1_METADATA_ADDRESS,
+    RA4M1_METADATA_SIZE,
     BundleError,
     DownloadModeEntry,
     FlasherError,
     FlashFailedError,
     LogCallback,
     ProgressCallback,
+    Ra4m1MetadataAction,
     SerialPortInfo,
+    _check_metadata_sector,
     _enter_node_download_mode,
     _esptool_command,
     bundle_profile_version,
@@ -68,6 +76,7 @@ from esp_prog2_flasher.flasher import (
     load_solo_bundle,
     otadata_selecting_ota0,
     provision_node,
+    ra4m1_metadata_action,
     read_bundle_version,
     read_node_config,
     release_tag_profile_version,
@@ -953,3 +962,47 @@ def test_esptool_progress_reads_esptool_5_progress_lines(line: str, percent: flo
 )
 def test_esptool_progress_ignores_other_esptool_lines(line: str) -> None:
     assert ESPTOOL_PROGRESS.search(line) is None
+
+
+@pytest.mark.parametrize(
+    ("base_address", "image_size", "action"),
+    [
+        (APP_BASE_ADDRESS, 1024, "erase"),
+        (APP_BASE_ADDRESS, RA4M1_METADATA_ADDRESS - APP_BASE_ADDRESS, "erase"),
+        (APP_BASE_ADDRESS, RA4M1_METADATA_ADDRESS - APP_BASE_ADDRESS + 1, "covered"),
+        (0x8000, 1024, "keep"),
+        (0x8000, RA4M1_METADATA_ADDRESS - 0x8000, "keep"),
+        (0x8000, 0x38000, "covered"),
+        (RA4M1_METADATA_ADDRESS, RA4M1_METADATA_SIZE, "covered"),
+    ],
+)
+def test_app_flash_erases_the_metadata_block_only_at_the_default_address_unless_covered(
+    base_address: int, image_size: int, action: Ra4m1MetadataAction
+) -> None:
+    assert ra4m1_metadata_action(base_address, image_size) == action
+
+
+def _session_with_region(region: SimpleNamespace | None) -> SimpleNamespace:
+    memory_map = SimpleNamespace(get_region_for_address=lambda address: region)
+    return SimpleNamespace(target=SimpleNamespace(memory_map=memory_map))
+
+
+def _flash_region(sector_size: int) -> SimpleNamespace:
+    flash = SimpleNamespace(get_sector_info=lambda address: SimpleNamespace(size=sector_size))
+    return SimpleNamespace(is_flash=True, flash=flash)
+
+
+def test_metadata_sector_check_accepts_one_2kb_flash_sector() -> None:
+    _check_metadata_sector(_session_with_region(_flash_region(RA4M1_METADATA_SIZE)))
+
+
+@pytest.mark.parametrize(
+    "region",
+    [None, _flash_region(0x1000)],
+    ids=["no-region", "4kb-sector"],
+)
+def test_metadata_sector_check_refuses_a_wrong_flash_geometry(
+    region: SimpleNamespace | None,
+) -> None:
+    with pytest.raises(FlashFailedError):
+        _check_metadata_sector(_session_with_region(region))

@@ -10,6 +10,8 @@ Covers:       mounting at 80x24 and 120x40 with every panel and every target's d
               one, and "no shortcut"; the SOLO flash wizard (n/esc cancel, y flashes like
               cli.py's --flash-solo), provision and read config like --provision-node and
               --read-node-config; the RA4M1 bootloader wizard with a known and a custom device;
+              the RA4M1 app flash confirm's Metadata row (erase, covered, keep) on one line of
+              the 80x24 confirm pane;
               shift+tab and "/" typed into a field; the browser's filter and pick; a finished
               run's Recent row and status; the help table built from the command table; the
               busy guard; ctrl+c; the terminal theme choice; the saved state (restore on launch,
@@ -31,6 +33,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from rich.cells import cell_len
 from textual.pilot import Pilot
 
 from esp_prog2_flasher import flasher
@@ -38,7 +41,7 @@ from esp_prog2_flasher.app import FlasherApp
 from esp_prog2_flasher.board_profile import SOLO_PROFILES
 from esp_prog2_flasher.dfu_config import DEFAULT_MANUFACTURER, DEVICE_CAN_IDS, DfuConfig
 from esp_prog2_flasher.flasher import DetectResult, TargetState
-from esp_prog2_flasher.tui import state
+from esp_prog2_flasher.tui import flows, state
 from esp_prog2_flasher.tui.browser import BrowserScreen
 from esp_prog2_flasher.tui.commands import (
     BROWSER_COMMANDS,
@@ -46,12 +49,12 @@ from esp_prog2_flasher.tui.commands import (
     GLOBAL_COMMANDS,
     help_rows,
 )
-from esp_prog2_flasher.tui.flows import Settings, target_fields
+from esp_prog2_flasher.tui.flows import AppFlashJob, Settings, target_fields
 from esp_prog2_flasher.tui.screens import CommandPopup, DashboardScreen, HelpScreen, RunScreen
 from esp_prog2_flasher.tui.targets import SOLO_TARGETS, RecentRun
 from esp_prog2_flasher.tui.theme import DARK_THEME_NAME, LIGHT_THEME_NAME, theme_name_for_terminal
-from esp_prog2_flasher.tui.widgets import DetailsView, FilterList, StatusLine
-from esp_prog2_flasher.tui.wizard import ChoiceStep, TextStep, WizardScreen
+from esp_prog2_flasher.tui.widgets import ChromeState, DetailsView, FilterList, StatusLine
+from esp_prog2_flasher.tui.wizard import ChoiceStep, TextStep, WizardScreen, WizardSpec
 
 AppTest = Callable[[FlasherApp, Pilot[None]], Awaitable[None]]
 SOLO_PORT = "COM9"
@@ -220,6 +223,47 @@ def test_idu_details_show_its_one_hold_and_no_i2c() -> None:
     fields = dict(target_fields(idu, Settings(), None))
     assert (fields["Record"], fields["Holds"]) == ("v2 · TWAI 6/7 @ 250k", "GPIO3 LOW")
     assert "I2C" not in fields and "Note" not in fields
+
+
+_METADATA_START = f"0x{flasher.RA4M1_METADATA_ADDRESS:X}"
+
+
+@pytest.mark.parametrize(
+    ("base_address", "image_size", "metadata"),
+    [
+        (
+            flasher.APP_BASE_ADDRESS,
+            1024,
+            f"{_METADATA_START}–0x3FFFF erased so the bootloader boots the new app",
+        ),
+        (
+            flasher.APP_BASE_ADDRESS,
+            0x3B801,
+            "overwritten by the image; the bootloader sees it unvalidated",
+        ),
+        (0x8000, 0x38000, f"{_METADATA_START} overwritten by the image; not erased separately"),
+        (0x8000, 1024, f"{_METADATA_START} left as is (non-default address)"),
+    ],
+    ids=["erase", "covered", "covered-non-default", "keep"],
+)
+def test_app_flash_confirm_says_what_happens_to_the_metadata_block_on_one_line(
+    base_address: int, image_size: int, metadata: str, tmp_path: Path
+) -> None:
+    image = tmp_path / "app.bin"
+    with image.open("wb") as file:
+        file.truncate(image_size)
+    confirm = flows.summary(AppFlashJob(image, base_address))
+    assert dict(confirm.rows)["Metadata"] == metadata
+
+    async def check(app: FlasherApp, pilot: Pilot[None]) -> None:
+        spec = WizardSpec(confirm.title, "", lambda _answers: [], lambda _answers: confirm)
+        app.push_screen(WizardScreen(ChromeState(version="test"), spec))
+        await pilot.pause()
+        rows = app.screen.query_one("#confirm-rows", DetailsView)
+        label_width = max(cell_len(label) for label, _ in confirm.rows)
+        assert label_width + 2 + cell_len(metadata) <= rows.content_size.width
+
+    run_app(check)
 
 
 def test_details_pane_hides_below_80_columns() -> None:
