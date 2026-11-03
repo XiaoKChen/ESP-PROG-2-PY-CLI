@@ -4,8 +4,8 @@
 Bundled firmware images for the target boards.
 
 - **Responsibility:** Default firmware flashed to the RA4M1 target and to the IDU Radar's PSoC 6.
-- **Key files:** `dfu_minima.hex`, `psoc6_radar_full_image.hex`.
-- **Relationships:** `dfu_minima.hex` is consumed by `flasher.flash` (pyOCD), resolved via `flasher.find_default_hex`; `psoc6_radar_full_image.hex` by `flasher.flash_psoc6`, resolved via `flasher.find_default_psoc6_hex`. Both overridable with `--hex`.
+- **Key files:** `bootloader-uno_r4.hex`, `psoc6_radar_full_image.hex`.
+- **Relationships:** `bootloader-uno_r4.hex` is consumed by `flasher.flash` (pyOCD), resolved via `flasher.find_default_hex` (name `flasher.HEX_NAME`, release `flasher.BUNDLED_BOOTLOADER_TAG`); `psoc6_radar_full_image.hex` by `flasher.flash_psoc6`, resolved via `flasher.find_default_psoc6_hex`. Both overridable with `--hex`. `.gitattributes` marks `*.hex -text`, so each file is stored byte-identical to its upstream asset on every OS.
 
-- **`dfu_minima.hex`** — The stock Arduino UNO R4 Minima DFU bootloader (Intel HEX, vector table at flash `0x0`: SP `0x200029d0`, reset `0x00001e55`). Programmed to the RA4M1's code flash via pyOCD.
+- **`bootloader-uno_r4.hex`** — The Embedded-CAN-Bootloaders CAN + DFU bootloader for the UNO R4 Minima (RA4M1), byte-identical to `bootloader-uno_r4-v1.2.0.hex` from release `c-cpp-ra4m1-v1.2.0` (sha256 `613002e4…f462`). Two segments: code flash `0x0–0x3B83` (15,236 B; vector table SP `0x20003230`, reset `0x0000272D`) and the ID-code block `0x01010018–0x01010033`; nothing at or above the app base `0x4000`. It reads the DFU config block at `0x40101C00` that `--flash --product` writes, and the image-metadata block at `0x3F800` that `--flash-app` erases. `tests/test_flasher.py` pins its segments and content. Replaces the stock Arduino `dfu_minima.hex` bundled up to v3.3.0.
 - **`psoc6_radar_full_image.hex`** — `full_image.hex` (bootloader + App1) from PSOC6-Dual-Radar v2.0.1 for the PSoC 62S3 (CY8C6245). Main-flash segments only are programmed; Cypress `0x90xxxxxx` metadata sections are stripped at flash time.

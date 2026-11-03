@@ -1,6 +1,6 @@
 # ESP-Prog-2 Flasher
 
-A `uv`-run Python **TUI/CLI** (v3.3.0) for flashing Normal Corporation's boards. A
+A `uv`-run Python **TUI/CLI** (v3.4.0) for flashing Normal Corporation's boards. A
 keyboard-driven dashboard (or headless flags) covers four jobs:
 
 ![ESP-Prog-2 Flasher dashboard: filter, "/" commands, SOLO flash wizard, run view](docs/images/tui-demo.gif)
