@@ -807,6 +807,23 @@ def test_a_recent_run_survives_a_restart_and_reruns_through_the_confirm(
     launch(state_file, second)
 
 
+def test_default_images_are_saved_empty_and_chosen_ones_kept(tmp_path: Path) -> None:
+    state_file = tmp_path / "state.json"
+    chosen = tmp_path / "mine.hex"
+    chosen.write_text(":00000001FF\n", encoding="utf-8")
+
+    async def check(app: FlasherApp, pilot: Pilot[None]) -> None:
+        app._save_state()
+        saved = json.loads(state_file.read_text(encoding="utf-8"))["settings"]
+        assert saved["boot_hex"] == "" and saved["psoc6_hex"] == ""
+        app._settings = replace(app.settings, boot_hex=str(chosen))
+        app._save_state()
+        saved = json.loads(state_file.read_text(encoding="utf-8"))["settings"]
+        assert saved["boot_hex"] == str(chosen) and saved["psoc6_hex"] == ""
+
+    launch(state_file, check)
+
+
 def test_recent_files_head_the_browser_and_missing_ones_are_dropped(tmp_path: Path) -> None:
     state_file = tmp_path / "state.json"
     image = tmp_path / "picked.hex"

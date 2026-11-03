@@ -6,7 +6,8 @@ functions over one versioned JSON file in the platform config directory, plus th
 turn what was read back into usable state. app.py calls it and decides when.
 
 Owns:        the file location, STATE_VERSION, the JSON shape and its validation, the atomic
-             write, and the fallback of saved paths that no longer exist.
+             write, the fallback of saved paths that no longer exist, and the replacement of a
+             saved bundled-asset path that is transient (PyInstaller temp dir) or legacy.
 Not here:    when to load or save, and the status lines (../app.py); what Settings and
              RecentRun mean (flows.py, targets.py).
 Invariants:  nothing sensitive is stored: ports, paths, names, CAN IDs and run results only.
@@ -56,6 +57,17 @@ _FILE_FIELDS: Final[dict[str, str]] = {
     "solo_app": "SOLO app .bin",
 }
 _FOLDER_FIELDS: Final[dict[str, str]] = {"solo_bundle_dir": "SOLO bundle folder"}
+# Settings fields whose default is a bundled asset that moves with the install, so the
+# default itself is never saved (an empty value means "the current default").
+BUNDLED_DEFAULT_FIELDS: Final[tuple[str, ...]] = ("boot_hex", "psoc6_hex")
+# The onefile PyInstaller extraction directory prefix; a path under it dies with the process.
+_PYINSTALLER_TEMP_PREFIX: Final[str] = "_MEI"
+# Up to v3.3.0 the bundled bootloader was the stock Arduino DFU, hex/dfu_minima.hex.
+LEGACY_BUNDLED_HEX_NAME: Final[str] = "dfu_minima.hex"
+_LEGACY_BUNDLED_HEX_LABEL: Final[str] = (
+    f"bootloader .hex (the old bundled {LEGACY_BUNDLED_HEX_NAME} was replaced "
+    "by the new bundled bootloader)"
+)
 _KNOWN_DEVICES: Final[frozenset[str]] = frozenset(
     {KEEP_DEFAULT_DEVICE, CUSTOM_DEVICE, *DEVICE_NAMES}
 )
@@ -141,15 +153,20 @@ def forget_state(path: Path) -> None:
 def restore_settings(saved: Settings, defaults: Settings) -> tuple[Settings, list[str]]:
     """Fall back to ``defaults`` for each saved path that vanished; list what was replaced.
 
-    Recent files that no longer exist are dropped silently.
+    Recent files that no longer exist are dropped silently. A bundled-default image saved
+    from inside a PyInstaller temp directory is transient and is replaced silently; a saved
+    legacy bundled bootloader is replaced and reported.
     """
     restored = saved
     missing: list[str] = []
     for name, label in {**_FILE_FIELDS, **_FOLDER_FIELDS}.items():
         value = getattr(saved, name)
         exists = Path.is_dir if name in _FOLDER_FIELDS else Path.is_file
-        if not value:
+        if not value or (name in BUNDLED_DEFAULT_FIELDS and _in_pyinstaller_temp(Path(value))):
             restored = replace(restored, **{name: getattr(defaults, name)})
+        elif name == "boot_hex" and Path(value).name == LEGACY_BUNDLED_HEX_NAME:
+            restored = replace(restored, **{name: getattr(defaults, name)})
+            missing.append(_LEGACY_BUNDLED_HEX_LABEL)
         elif not exists(Path(value)):
             restored = replace(restored, **{name: getattr(defaults, name)})
             missing.append(label)
@@ -160,6 +177,10 @@ def restore_settings(saved: Settings, defaults: Settings) -> tuple[Settings, lis
         recent_bundle=_existing(saved.recent_bundle, Path.is_dir),
     )
     return restored, missing
+
+
+def _in_pyinstaller_temp(path: Path) -> bool:
+    return any(part.startswith(_PYINSTALLER_TEMP_PREFIX) for part in path.parts)
 
 
 def _existing(files: tuple[str, ...], exists: Callable[[Path], bool]) -> tuple[str, ...]:

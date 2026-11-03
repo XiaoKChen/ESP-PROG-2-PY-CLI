@@ -401,7 +401,14 @@ class FlasherApp(App[None]):
         if self._state_path is None or not self._state_writable:
             return
         selected, collapsed = self._dashboard.view_state
-        snapshot = state.SavedState(self._settings, tuple(self._recents), selected, collapsed)
+        # A default is saved as "" so a later install resolves its own bundled asset.
+        unchanged_defaults = {
+            name: ""
+            for name in state.BUNDLED_DEFAULT_FIELDS
+            if getattr(self._settings, name) == getattr(self._defaults, name)
+        }
+        settings = replace(self._settings, **unchanged_defaults)
+        snapshot = state.SavedState(settings, tuple(self._recents), selected, collapsed)
         try:
             state.save_state(self._state_path, snapshot)
         except OSError as exc:
