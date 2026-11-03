@@ -138,7 +138,7 @@ _DOWNLOAD_TIMEOUT_S: Final[int] = 60
 # and fsp.ld uses it as the sketch's FLASH region origin — this is the address a
 # PlatformIO/Arduino build for this board is linked at, i.e. "where pio upload
 # writes it". Verified against the bootloader bundled in this repo
-# (hex/bootloader-uno_r4.hex): its code ends at 0x3B84 (well under 0x4000) and its ID
+# (hex/bootloader-uno_r4.hex): its image ends at 0x3B84 (well under 0x4000) and its ID
 # Code block write lands at 0x01010018, matching ID_CODE_START in that same
 # memory_regions.ld — confirming this bootloader was built from that exact
 # linker layout.
