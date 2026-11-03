@@ -402,12 +402,15 @@ class FlasherApp(App[None]):
             return
         selected, collapsed = self._dashboard.view_state
         # A default is saved as "" so a later install resolves its own bundled asset.
-        unchanged_defaults = {
-            name: ""
-            for name in state.BUNDLED_DEFAULT_FIELDS
-            if getattr(self._settings, name) == getattr(self._defaults, name)
-        }
-        settings = replace(self._settings, **unchanged_defaults)
+        settings = replace(
+            self._settings,
+            boot_hex=""
+            if self._settings.boot_hex == self._defaults.boot_hex
+            else self._settings.boot_hex,
+            psoc6_hex=""
+            if self._settings.psoc6_hex == self._defaults.psoc6_hex
+            else self._settings.psoc6_hex,
+        )
         snapshot = state.SavedState(settings, tuple(self._recents), selected, collapsed)
         try:
             state.save_state(self._state_path, snapshot)
