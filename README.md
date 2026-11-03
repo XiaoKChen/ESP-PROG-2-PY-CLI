@@ -180,8 +180,10 @@ The RA4M1 rows need a Detect that found the RA4M1; one runs at start-up and
 ![The "/" command popup on a SOLO preset](docs/images/tui-commands.png)
 
 **Every flash, erase or provision asks first.** The wizard ends on a summary:
-the chip or board, the image(s), the address range or layout and, for config
-writes, the manufacturer, product and CAN IDs. **`y`** starts the write,
+the chip or board, the image(s), the address range or layout, for an RA4M1
+application what happens to the bootloader's metadata block at `0x3F800`
+(erased, overwritten by the image or left as is) and, for config writes, the
+manufacturer, product and CAN IDs. **`y`** starts the write,
 **`n`** or **`esc`** cancels. Reading a config, detecting and downloading the
 official image never ask. A running job shows a spinner, a progress bar and
 its log; `esc` goes back to the dashboard while it keeps running, and no
