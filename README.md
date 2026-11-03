@@ -494,6 +494,8 @@ first runs.
    The image must start at or above the bootloader's app base (`0x4000`, or
    `0x8000` with `--embassy`) and end by `0x40000`; anything else, or an empty
    image, is refused before the probe is opened.
+   Every run prints which bootloader it is protecting (the C one unless `--embassy`
+   is given); `--embassy` and `--app-address` are errors (exit 2) without `--flash-app`.
 5. **Flash PSoC 6** — loads the `.hex`, keeps only the segments inside PSoC 6
    main flash (see [Safety](#psoc-6-idu-radar)), programs them against pyOCD's
    built-in `cy8c6xx5` target via `FlashLoader`, then resets.

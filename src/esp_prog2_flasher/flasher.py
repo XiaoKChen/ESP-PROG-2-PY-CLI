@@ -73,6 +73,7 @@ flashing the RA4M1 must go through pyOCD, not OpenOCD.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import logging
 import re
@@ -602,19 +603,30 @@ def flash_app(
     ``embassy`` selects the Embassy bootloader, whose app base is ``EMBASSY_APP_BASE_ADDRESS``;
     the range check then makes ``APP_BASE_ADDRESS`` unreachable, so the metadata block at
     ``RA4M1_METADATA_ADDRESS`` is never erased (only overwritten if the image covers it).
+    The image is read once: the bytes range-checked are the bytes programmed.
     """
     from pyocd.flash.eraser import FlashEraser
     from pyocd.flash.file_programmer import FileProgrammer
 
-    bin_path = Path(bin_path)
-    if not bin_path.is_file():
-        raise FileNotFoundError(f"Application file not found: {bin_path}")
-    image_size = bin_path.stat().st_size
-    check_app_range(base_address, image_size, embassy)
-
     def _log(msg: str) -> None:
         if log is not None:
             log(msg)
+
+    bin_path = Path(bin_path)
+    if not bin_path.is_file():
+        raise FileNotFoundError(f"Application file not found: {bin_path}")
+    data = bin_path.read_bytes()
+    image_size = len(data)
+    # Stopgap until the bootloader is detected from the target (issue #43): an Embassy
+    # user who forgets embassy=True sees which bootloader is being protected.
+    if embassy:
+        _log(f"Protecting the Embassy bootloader below 0x{EMBASSY_APP_BASE_ADDRESS:X}.")
+    else:
+        _log(
+            f"Protecting the C bootloader below 0x{APP_BASE_ADDRESS:X} "
+            "(pass --embassy for an Embassy board)."
+        )
+    check_app_range(base_address, image_size, embassy)
 
     probe = _choose_raw(unique_id)
     if probe is None:
@@ -632,7 +644,7 @@ def flash_app(
         # chip_erase="sector" erases only the pages this .bin touches — the
         # bootloader region below base_address is never erased or written.
         programmer = FileProgrammer(session, progress=progress, chip_erase="sector")
-        programmer.program(str(bin_path), file_format="bin", base_address=base_address)
+        programmer.program(io.BytesIO(data), file_format="bin", base_address=base_address)
         match ra4m1_metadata_action(base_address, image_size):
             case "erase":
                 _check_metadata_sector(session)

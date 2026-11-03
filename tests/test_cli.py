@@ -4,7 +4,8 @@ Covers:       --version printing the package version and exiting 0; --provision-
               SOLO preset's board profile in the cancfg image, and writing the v2 block alone
               for any other product; --flash-app resolving --app-address to 0x4000, or to 0x8000
               with --embassy, and passing --embassy through to flash_app; a refused app range
-              exiting 2 with one line on stderr and no traceback.
+              exiting 2 with one line on stderr and no traceback; --embassy or --app-address without
+              --flash-app exiting 2 before any flash or detect.
 Not covered:  argument parsing as a whole; esptool runs (tests/test_flasher.py).
 See also:     src/esp_prog2_flasher/cli.py, src/esp_prog2_flasher/board_profile.py
 """
@@ -113,6 +114,32 @@ def test_flash_app_resolves_the_app_address_and_passes_embassy_through(
     assert len(calls) == 1
     assert calls[0]["base_address"] == base_address
     assert calls[0]["embassy"] is embassy
+
+
+@pytest.mark.parametrize(
+    ("argv", "flag"),
+    [
+        (["--flash", "--embassy"], "--embassy"),
+        (["--detect", "--app-address", "0x8000"], "--app-address"),
+    ],
+    ids=["flash-embassy", "detect-app-address"],
+)
+def test_app_flash_flags_without_flash_app_exit_2_before_touching_hardware(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+    flag: str,
+) -> None:
+    def fail(*_a: object, **_k: object) -> None:
+        raise AssertionError("hardware call reached")
+
+    monkeypatch.setattr(flasher, "flash", fail)
+    monkeypatch.setattr(flasher, "detect", fail)
+    monkeypatch.setattr(sys, "argv", ["esp-prog2-flasher", *argv])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 2
+    assert capsys.readouterr().err == f"{flag} only applies with --flash-app.\n"
 
 
 def test_flash_app_refusal_exits_2_with_one_line_and_no_traceback(

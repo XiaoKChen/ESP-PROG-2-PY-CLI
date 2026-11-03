@@ -18,8 +18,9 @@ Invariants:  the node flags and --flash-solo never auto-detect a port — auto-d
              with --flash-solo. --flash-probe without --port only takes the running bridge: when
              just 303A:1001 ports exist (ESP-Prog-2 in download mode or a SOLO board) it lists
              them and exits 2.
-Errors:      invalid or conflicting arguments exit with code 2, as does a --flash-app image
-             or address outside the bootloader's app range; a failed flash, download, bundle
+Errors:      invalid or conflicting arguments exit with code 2, as do --embassy or --app-address
+             without --flash-app, an empty --flash-app image, and an image or address outside the
+             bootloader's app range; a failed flash, download, bundle
              fetch or node read logs the exception, prints to stderr and exits with code 1; --detect
              exits 2 only when no probe is found, otherwise 0; --read-node-config exits 0 for
              both a provisioned and an unprovisioned node.
@@ -529,6 +530,15 @@ def main() -> None:
         return
 
     args = _build_parser().parse_args()
+
+    if not args.flash_app:
+        for flag, given in (
+            ("--embassy", args.embassy),
+            ("--app-address", args.app_address is not None),
+        ):
+            if given:
+                print(f"{flag} only applies with --flash-app.", file=sys.stderr)
+                sys.exit(2)
 
     if args.list:
         probes = flasher.list_probes()

@@ -65,6 +65,7 @@ from esp_prog2_flasher.flasher import (
     RA4M1_CODE_FLASH_END,
     RA4M1_METADATA_ADDRESS,
     RA4M1_METADATA_SIZE,
+    AppRangeError,
     BundleError,
     DownloadModeEntry,
     FlasherError,
@@ -1040,7 +1041,7 @@ def test_metadata_sector_check_refuses_a_wrong_flash_geometry(
 def test_check_app_range_refuses_an_image_outside_the_app_region(
     base_address: int, image_size: int, embassy: bool
 ) -> None:
-    with pytest.raises(FlasherError):
+    with pytest.raises(AppRangeError):
         check_app_range(base_address, image_size, embassy)
 
 
@@ -1104,5 +1105,5 @@ def test_flash_app_refuses_a_bad_address_before_choosing_a_probe(
     image = tmp_path / "app.bin"
     image.write_bytes(bytes(image_size))
 
-    with pytest.raises(FlasherError):
+    with pytest.raises(AppRangeError):
         flash_app(image, base_address=base_address, embassy=embassy)

@@ -15,8 +15,10 @@ Not here:    running jobs and every flasher call (../app.py); the wizard and bro
 Invariants:  a KNOWN device or SOLO preset always carries its fixed CAN ID pair from
              dfu_config.DEVICE_CAN_IDS; a custom pair is both-or-neither and 11-bit. Resolving
              is pure: Settings change only through the returned copy.
-Errors:      bad typed input is a validation message on the field, never an exception.
-Depends on:  flasher.py constants and SerialPortInfo (no hardware calls), dfu_config.py,
+Errors:      bad typed input is a validation message on the field, never an exception; an RA4M1
+             app image outside its bootloader's range is a Refused row on a non-actionable confirm.
+Depends on:  flasher.py constants, SerialPortInfo and pure range/metadata checks (no hardware
+             calls), dfu_config.py,
              board_profile.py, wizard.py, browser.py.
 See also:    ../app.py, ../cli.py, tests/test_app.py
 """
@@ -118,11 +120,7 @@ class BootFlashJob:
 class AppFlashJob:
     bin_path: Path
     base_address: int
-
-    @property
-    def embassy(self) -> bool:
-        # The wizard offers only the two bootloaders' app bases, so the base says which one.
-        return self.base_address == flasher.EMBASSY_APP_BASE_ADDRESS
+    embassy: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -525,7 +523,9 @@ def app_flash_flow(settings: Settings) -> JobFlow:
     def resolve(answers: Answers) -> tuple[Settings, Job]:
         embassy = answers.get("base") == embassy_base if "base" in answers else settings.embassy
         updated = replace(settings, app_bin=answers.get("image", settings.app_bin), embassy=embassy)
-        return updated, AppFlashJob(Path(updated.app_bin), updated.app_base_address)
+        return updated, AppFlashJob(
+            Path(updated.app_bin), updated.app_base_address, updated.embassy
+        )
 
     subtitle = f"RA4M1 ({flasher.TARGET_TYPE}) over SWD, above the bootloader"
     return _job_flow("Flash the RA4M1 application", subtitle, steps, resolve)

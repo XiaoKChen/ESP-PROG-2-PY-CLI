@@ -11,8 +11,10 @@ Covers:       mounting at 80x24 and 120x40 with every panel and every target's d
               cli.py's --flash-solo), provision and read config like --provision-node and
               --read-node-config; the RA4M1 bootloader wizard with a known and a custom device;
               the RA4M1 app flash confirm's Metadata row (erase, covered, keep) on one line of
-              the 80x24 confirm pane, and its Refused row (no Address or Metadata, y ignored) for
-              an image outside the bootloader's app range;
+              the 80x24 confirm pane, its Refused row (no Address or Metadata, no y hint, y
+              ignored, n closes) for an image outside the bootloader's app range, also when only
+              the Embassy bootloader rules it out, and the app flow storing the bootloader choice
+              with the chosen base;
               shift+tab and "/" typed into a field; the browser's filter and pick; a finished
               run's Recent row and status; the help table built from the command table; the
               busy guard; ctrl+c; the terminal theme choice; the saved state (restore on launch,
@@ -253,7 +255,7 @@ def test_app_flash_confirm_says_what_happens_to_the_metadata_block_on_one_line(
     image = tmp_path / "app.bin"
     with image.open("wb") as file:
         file.truncate(image_size)
-    confirm = flows.summary(AppFlashJob(image, base_address))
+    confirm = flows.summary(AppFlashJob(image, base_address, embassy=False))
     assert dict(confirm.rows)["Metadata"] == metadata
 
     async def check(app: FlasherApp, pilot: Pilot[None]) -> None:
@@ -271,7 +273,7 @@ def test_app_flash_confirm_refuses_an_out_of_range_image_and_ignores_y(tmp_path:
     image = tmp_path / "app.bin"
     with image.open("wb") as file:
         file.truncate(0x38001)
-    confirm = flows.summary(AppFlashJob(image, flows.Settings(embassy=True).app_base_address))
+    confirm = flows.summary(AppFlashJob(image, flows.Settings(embassy=True).app_base_address, True))
     labels = [label for label, _ in confirm.rows]
     assert "Refused" in labels
     assert "Address" not in labels and "Metadata" not in labels
@@ -285,11 +287,43 @@ def test_app_flash_confirm_refuses_an_out_of_range_image_and_ignores_y(tmp_path:
         rows = screen.query_one("#confirm-rows", DetailsView)
         assert rows.region.bottom <= app.size.height
         assert screen.query_one("#confirm-prompt").region.bottom <= app.size.height
+        assert isinstance(screen, WizardScreen)
+        assert "y" not in [key for key, _ in screen.footer_hints()]
         await pilot.press("y")
         await pilot.pause()
         assert app.screen is screen
+        await pilot.press("n")
+        await pilot.pause()
+        assert app.screen is not screen
 
     run_app(check)
+
+
+@pytest.mark.parametrize(
+    ("saved_embassy", "answer", "embassy", "base_address"),
+    [(False, "0x8000", True, 0x8000), (True, "0x4000", False, 0x4000)],
+    ids=["picks-embassy", "picks-c"],
+)
+def test_app_flash_flow_stores_the_bootloader_choice_with_the_chosen_base(
+    saved_embassy: bool, answer: str, embassy: bool, base_address: int
+) -> None:
+    flow = flows.app_flash_flow(Settings(embassy=saved_embassy))
+    _settings, job = flow.resolve({"image": "app.bin", "base": answer})
+    assert isinstance(job, AppFlashJob)
+    assert job.embassy is embassy
+    assert job.base_address == base_address
+
+
+def test_app_flash_confirm_refuses_an_image_that_only_the_embassy_bootloader_rules_out(
+    tmp_path: Path,
+) -> None:
+    image = tmp_path / "app.bin"
+    with image.open("wb") as file:
+        file.truncate(0x100)
+    confirm = flows.summary(AppFlashJob(image, flasher.APP_BASE_ADDRESS, embassy=True))
+    assert not confirm.actionable
+    refused = dict(confirm.rows)["Refused"]
+    assert "Embassy bootloader" in refused
 
 
 def test_details_pane_hides_below_80_columns() -> None:
