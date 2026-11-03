@@ -455,6 +455,7 @@ def flash(
     ``boot_reply_id`` CAN ID pair. Omit the names to leave the board on the
     bootloader's compiled-in defaults.
     """
+    from intelhex import IntelHex
     from pyocd.flash.file_programmer import FileProgrammer
 
     hex_path = Path(hex_path)
@@ -487,7 +488,10 @@ def flash(
         _log("Reset/halt target")
         session.target.reset_and_halt()
         resolved = hex_path.resolve()
-        _log(f"Programming {resolved} ({resolved.stat().st_size} bytes)")
+        # Count the firmware bytes the records carry, not the size of the .hex text.
+        segments = IntelHex(str(resolved)).segments()
+        firmware_bytes = sum(end - start for start, end in segments)
+        _log(f"Programming {resolved} ({firmware_bytes} bytes in {len(segments)} segments)")
         bundled = find_default_hex()
         if bundled is not None and resolved == bundled.resolve():
             _log(
