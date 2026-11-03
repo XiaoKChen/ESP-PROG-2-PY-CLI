@@ -64,9 +64,6 @@ RELEASE_BUNDLE: Final[str] = "\x00release"
 OTHER_TAG: Final[str] = "\x00tag"
 NO_APP: Final[str] = "\x00none"
 
-# Embassy bootloader reserves 32 KiB for itself, so its app slot starts here
-# (vs. the 16 KiB C bootloader's flasher.APP_BASE_ADDRESS == 0x4000).
-EMBASSY_APP_BASE_ADDRESS: Final[int] = 0x8000
 # ESP32-S3 USB-Serial-JTAG / ROM download PID: a SOLO board, or an ESP-Prog-2 in download mode.
 _MISSING_IMAGE: Final[str] = "none — / f picks one"
 # The SWD targets that flash one image file, and how the browser picks it.
@@ -105,7 +102,7 @@ class Settings:
 
     @property
     def app_base_address(self) -> int:
-        return EMBASSY_APP_BASE_ADDRESS if self.embassy else flasher.APP_BASE_ADDRESS
+        return flasher.EMBASSY_APP_BASE_ADDRESS if self.embassy else flasher.APP_BASE_ADDRESS
 
 
 @dataclass(frozen=True, slots=True)
@@ -502,7 +499,7 @@ def boot_flash_flow(settings: Settings) -> JobFlow:
 
 def app_flash_flow(settings: Settings) -> JobFlow:
     c_base = f"0x{flasher.APP_BASE_ADDRESS:X}"
-    embassy_base = f"0x{EMBASSY_APP_BASE_ADDRESS:X}"
+    embassy_base = f"0x{flasher.EMBASSY_APP_BASE_ADDRESS:X}"
 
     def steps(_answers: Answers) -> list[Step]:
         image = _image_step(
