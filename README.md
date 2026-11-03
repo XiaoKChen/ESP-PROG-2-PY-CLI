@@ -235,7 +235,7 @@ uv run esp-prog2-flasher --flash --product "IDU Controller" --manufacturer "Acme
 uv run esp-prog2-flasher --flash --product "My Custom Board" --boot-cmd-id 0x700 --boot-reply-id 0x701
 
 uv run esp-prog2-flasher --flash-app path/to/firmware.bin        # flash an app .bin to the RA4M1 app region (0x4000), erase the metadata block at 0x3F800
-uv run esp-prog2-flasher --flash-app path/to/firmware.bin --app-address 0x8000   # override the base address; leaves 0x3F800 as is
+uv run esp-prog2-flasher --flash-app path/to/firmware.bin --app-address 0x8000   # override the base address; skips the 0x3F800 erase (the image may still cover it)
 
 uv run esp-prog2-flasher --detect --psoc6   # detect a PSoC 6 target (IDU Radar) instead of the RA4M1
 uv run esp-prog2-flasher --flash-psoc6      # flash the PSoC 6 with the bundled hex (bootloader + App1)
@@ -483,7 +483,9 @@ first runs.
    bootloader's metadata block (`0x3F800`–`0x3FFFF`: image record and update
    marker), since a stale one makes the bootloader park in DFU instead of booting
    the new app; the erase is skipped, with a warning, when the image itself reaches
-   `0x3F800`, and never done at any other base address (e.g. Embassy's `0x8000`).
+   `0x3F800`. Any other base address (e.g. Embassy's `0x8000`) skips that erase,
+   though an image there may still cover the block itself. The erase is refused
+   unless pyOCD's memory map puts the block in exactly one 2 KB flash sector.
 5. **Flash PSoC 6** — loads the `.hex`, keeps only the segments inside PSoC 6
    main flash (see [Safety](#psoc-6-idu-radar)), programs them against pyOCD's
    built-in `cy8c6xx5` target via `FlashLoader`, then resets.

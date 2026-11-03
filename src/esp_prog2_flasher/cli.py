@@ -109,7 +109,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "the application region only (never the bootloader) — flash the bootloader with "
         "--flash first. At the default --app-address it also erases the bootloader's "
         f"metadata block at 0x{flasher.RA4M1_METADATA_ADDRESS:X} so the bootloader boots the "
-        "new app; other addresses leave that block alone.",
+        "new app; other addresses skip that erase (the image itself may still cover the "
+        "block).",
     )
     p.add_argument(
         "--app-address",
