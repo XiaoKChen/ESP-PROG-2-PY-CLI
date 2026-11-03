@@ -19,7 +19,11 @@ Covers:       flash_solo (both presets, migrate-stock erase, app + otadata, --af
               otadata_selecting_ota0, fetch_solo_bundle (success, missing release, missing gh,
               no asset), ra4m1_metadata_action, the RA4M1 app flash's decision to erase, skip
               (the image covers it, at any base) or keep the bootloader's metadata block, and
-              _check_metadata_sector refusing a missing region or a sector other than 2 KB.
+              _check_metadata_sector refusing a missing region or a sector other than 2 KB,
+              check_app_range (below the bootloader's app base for the C and Embassy
+              bootloaders, past code-flash end, an empty image, a negative address, and the
+              issue #39 metadata-sized image), and flash_app refusing each before any probe is
+              chosen.
 Not covered:  real esptool runs against a board, a real 1200-baud touch or port listing, the
               real gh download, the pyOCD paths (the metadata erase itself included).
 See also:     src/esp_prog2_flasher/flasher.py, tests/test_board_profile.py
@@ -52,13 +56,16 @@ from esp_prog2_flasher.dfu_config import DEFAULT_MANUFACTURER, InvalidNameError
 from esp_prog2_flasher.flasher import (
     APP_BASE_ADDRESS,
     DEFAULT_BAUD_RATE,
+    EMBASSY_APP_BASE_ADDRESS,
     ESP32S3_USB_JTAG_PID,
     ESP_PROG_VID,
     ESPTOOL_PROGRESS,
     NODE_CHIP,
     NODE_ROM_PORT_TIMEOUT_S,
+    RA4M1_CODE_FLASH_END,
     RA4M1_METADATA_ADDRESS,
     RA4M1_METADATA_SIZE,
+    AppRangeError,
     BundleError,
     DownloadModeEntry,
     FlasherError,
@@ -71,7 +78,9 @@ from esp_prog2_flasher.flasher import (
     _enter_node_download_mode,
     _esptool_command,
     bundle_profile_version,
+    check_app_range,
     fetch_solo_bundle,
+    flash_app,
     flash_solo,
     load_solo_bundle,
     otadata_selecting_ota0,
@@ -1006,3 +1015,95 @@ def test_metadata_sector_check_refuses_a_wrong_flash_geometry(
 ) -> None:
     with pytest.raises(FlashFailedError):
         _check_metadata_sector(_session_with_region(region))
+
+
+@pytest.mark.parametrize(
+    ("base_address", "image_size", "embassy"),
+    [
+        (0x0, 0x100, False),
+        (APP_BASE_ADDRESS - 1, 0x100, False),
+        (-0x4000, 0x100, False),
+        (APP_BASE_ADDRESS, RA4M1_CODE_FLASH_END - APP_BASE_ADDRESS + 1, False),
+        (APP_BASE_ADDRESS, 0, False),
+        (APP_BASE_ADDRESS, 0x100, True),
+        (EMBASSY_APP_BASE_ADDRESS - 1, 0x100, True),
+    ],
+    ids=[
+        "zero",
+        "just-below-app-base",
+        "negative",
+        "past-code-flash-end",
+        "empty-image",
+        "embassy-at-c-base",
+        "embassy-just-below-base",
+    ],
+)
+def test_check_app_range_refuses_an_image_outside_the_app_region(
+    base_address: int, image_size: int, embassy: bool
+) -> None:
+    with pytest.raises(AppRangeError):
+        check_app_range(base_address, image_size, embassy)
+
+
+def test_check_app_range_names_the_bootloader_it_would_overwrite() -> None:
+    with pytest.raises(FlasherError, match="C bootloader"):
+        check_app_range(0x0, 0x100)
+    with pytest.raises(FlasherError, match="Embassy bootloader"):
+        check_app_range(APP_BASE_ADDRESS, 0x100, embassy=True)
+
+
+def test_check_app_range_formats_a_negative_address_without_a_minus_in_hex() -> None:
+    with pytest.raises(FlasherError) as raised:
+        check_app_range(-0x4000, 0x100)
+    assert "0x-" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("base_address", "image_size", "embassy"),
+    [
+        (APP_BASE_ADDRESS, 0x100, False),
+        (0x8000, 0x100, False),
+        (APP_BASE_ADDRESS, RA4M1_CODE_FLASH_END - APP_BASE_ADDRESS, False),
+        (RA4M1_METADATA_ADDRESS, RA4M1_METADATA_SIZE, False),
+        (EMBASSY_APP_BASE_ADDRESS, 0x100, True),
+    ],
+    ids=[
+        "default-base",
+        "embassy-base",
+        "ends-exactly-at-code-flash-end",
+        "issue-39-ff-bin",
+        "embassy-flag-at-embassy-base",
+    ],
+)
+def test_check_app_range_accepts_an_image_inside_the_app_region(
+    base_address: int, image_size: int, embassy: bool
+) -> None:
+    check_app_range(base_address, image_size, embassy)
+
+
+@pytest.mark.parametrize(
+    ("base_address", "image_size", "embassy"),
+    [
+        (0x0, 16, False),
+        (RA4M1_METADATA_ADDRESS, RA4M1_METADATA_SIZE + 1, False),
+        (APP_BASE_ADDRESS, 0, False),
+        (APP_BASE_ADDRESS, 16, True),
+    ],
+    ids=["below-app-base", "oversized", "empty", "embassy-at-c-base"],
+)
+def test_flash_app_refuses_a_bad_address_before_choosing_a_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    base_address: int,
+    image_size: int,
+    embassy: bool,
+) -> None:
+    def fail_if_called(*args: object, **kwargs: object) -> None:
+        pytest.fail("flash_app reached the probe despite a bad app address")
+
+    monkeypatch.setattr("esp_prog2_flasher.flasher._choose_raw", fail_if_called)
+    image = tmp_path / "app.bin"
+    image.write_bytes(bytes(image_size))
+
+    with pytest.raises(AppRangeError):
+        flash_app(image, base_address=base_address, embassy=embassy)

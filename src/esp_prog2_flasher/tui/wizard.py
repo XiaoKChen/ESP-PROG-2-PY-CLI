@@ -10,9 +10,9 @@ Owns:        the step shapes (TextStep, ChoiceStep, Confirm, WizardSpec), the an
              map, the step order and back-tracking, and the wizard's key handling.
 Not here:    which steps a flow has and what its answers mean (flows.py); the browser
              (browser.py); starting jobs (../app.py).
-Invariants:  the wizard dismisses with the answers only after the last step (and, with a
-             confirm, only on "y"); every other way out dismisses None. In a text field every
-             printable key, "/" included, is typed literally.
+Invariants:  the wizard dismisses with the answers only after the last step (and, with an
+             actionable confirm, only on "y"); every other way out dismisses None. In a text
+             field every printable key, "/" included, is typed literally.
 Depends on:  textual, rich, browser.py, commands.py, screens.py, widgets.py.
 See also:    flows.py, ../app.py, tests/test_app.py
 """
@@ -82,6 +82,7 @@ class Confirm:
     title: str
     rows: tuple[Field, ...]
     verb: str
+    actionable: bool = True  # False: the write is refused; only n/esc is offered
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,7 +217,9 @@ class WizardScreen(ChromeScreen[Answers | None]):
         elif confirm is not None:
             self.query_one("#step-label", Static).update("Summary")
             self.query_one("#confirm-rows", DetailsView).set_content(confirm.rows)
-            prompt = Text(f"? {confirm.verb} now?  y / n")
+            prompt = Text(
+                f"? {confirm.verb} now?  y / n" if confirm.actionable else "✗ Refused  n / esc"
+            )
             self.query_one("#confirm-prompt", Static).update(prompt)
         else:
             self.query_one("#step-label", Static).update(Text(step.label if step else ""))
@@ -246,7 +249,10 @@ class WizardScreen(ChromeScreen[Answers | None]):
     def footer_hints(self) -> Sequence[Hint]:
         back: list[Hint] = [("shift+tab", "back")] if self._order else []
         if self._confirm is not None:
-            return [("y", self._confirm.verb.lower()), ("n/esc", "cancel"), *back]
+            confirm_hints: list[Hint] = [("n/esc", "cancel"), *back]
+            if self._confirm.actionable:
+                confirm_hints.insert(0, ("y", self._confirm.verb.lower()))
+            return confirm_hints
         if isinstance(self._step, ChoiceStep):
             query = self.choice_list.query_text
             hints: list[Hint] = [("↑/↓", "move"), ("enter", "pick"), ("type", "to filter")]
@@ -259,7 +265,8 @@ class WizardScreen(ChromeScreen[Answers | None]):
         if self._confirm is not None:
             event.stop()
             if event.character in ("y", "Y"):
-                self.dismiss(self.answered)
+                if self._confirm.actionable:
+                    self.dismiss(self.answered)
             elif event.character in ("n", "N") or event.key == "escape":
                 self.dismiss(None)
             return

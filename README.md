@@ -184,7 +184,9 @@ the chip or board, the image(s), the address range or layout, for an RA4M1
 application what happens to the bootloader's metadata block at `0x3F800`
 (erased, overwritten by the image or left as is) and, for config writes, the
 manufacturer, product and CAN IDs. **`y`** starts the write,
-**`n`** or **`esc`** cancels. Reading a config, detecting and downloading the
+**`n`** or **`esc`** cancels. An application image outside the bootloader's app
+range (or empty) shows a **Refused** row instead, and `y` does nothing: only
+`n` or `esc` leaves. Reading a config, detecting and downloading the
 official image never ask. A running job shows a spinner, a progress bar and
 its log; `esc` goes back to the dashboard while it keeps running, and no
 other write starts until it finishes. When it ends, the result shows in the
@@ -237,7 +239,8 @@ uv run esp-prog2-flasher --flash --product "IDU Controller" --manufacturer "Acme
 uv run esp-prog2-flasher --flash --product "My Custom Board" --boot-cmd-id 0x700 --boot-reply-id 0x701
 
 uv run esp-prog2-flasher --flash-app path/to/firmware.bin        # flash an app .bin to the RA4M1 app region (0x4000), erase the metadata block at 0x3F800
-uv run esp-prog2-flasher --flash-app path/to/firmware.bin --app-address 0x8000   # override the base address; skips the 0x3F800 erase (the image may still cover it)
+uv run esp-prog2-flasher --flash-app path/to/firmware.bin --embassy   # Embassy bootloader: app at 0x8000, nothing below 0x8000 is written, 0x3F800 is never erased
+uv run esp-prog2-flasher --flash-app path/to/firmware.bin --app-address 0x9000   # override the base address; skips the 0x3F800 erase (the image may still cover it); the address must be at least the bootloader's app base (0x4000, or 0x8000 with --embassy) and the image must end by 0x40000, or nothing is flashed
 
 uv run esp-prog2-flasher --detect --psoc6   # detect a PSoC 6 target (IDU Radar) instead of the RA4M1
 uv run esp-prog2-flasher --flash-psoc6      # flash the PSoC 6 with the bundled hex (bootloader + App1)
@@ -478,7 +481,7 @@ first runs.
    (DFU names + boot CAN ID pair) to the target's data flash (`0x40101C00`)
    before the reset.
 4. **Flash application** — programs an app `.bin` at the application base address
-   (`0x4000` by default, overridable) via pyOCD's `FileProgrammer`, then resets.
+   (`0x4000` by default, `0x8000` with `--embassy`, overridable) via pyOCD's `FileProgrammer`, then resets.
    A `.bin` carries no load address, so the base address is supplied explicitly;
    only the pages the image touches are sector-erased, so the bootloader region
    below it is left intact. At the default `0x4000` it then erases the C
@@ -488,6 +491,11 @@ first runs.
    `0x3F800`. Any other base address (e.g. Embassy's `0x8000`) skips that erase,
    though an image there may still cover the block itself. The erase is refused
    unless pyOCD's memory map puts the block in exactly one 2 KB flash sector.
+   The image must start at or above the bootloader's app base (`0x4000`, or
+   `0x8000` with `--embassy`) and end by `0x40000`; anything else, or an empty
+   image, is refused before the probe is opened.
+   Every run prints which bootloader it is protecting (the C one unless `--embassy`
+   is given); `--embassy` and `--app-address` are errors (exit 2) without `--flash-app`.
 5. **Flash PSoC 6** — loads the `.hex`, keeps only the segments inside PSoC 6
    main flash (see [Safety](#psoc-6-idu-radar)), programs them against pyOCD's
    built-in `cy8c6xx5` target via `FlashLoader`, then resets.

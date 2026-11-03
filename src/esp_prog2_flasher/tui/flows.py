@@ -15,8 +15,10 @@ Not here:    running jobs and every flasher call (../app.py); the wizard and bro
 Invariants:  a KNOWN device or SOLO preset always carries its fixed CAN ID pair from
              dfu_config.DEVICE_CAN_IDS; a custom pair is both-or-neither and 11-bit. Resolving
              is pure: Settings change only through the returned copy.
-Errors:      bad typed input is a validation message on the field, never an exception.
-Depends on:  flasher.py constants and SerialPortInfo (no hardware calls), dfu_config.py,
+Errors:      bad typed input is a validation message on the field, never an exception; an RA4M1
+             app image outside its bootloader's range is a Refused row on a non-actionable confirm.
+Depends on:  flasher.py constants, SerialPortInfo and pure range/metadata checks (no hardware
+             calls), dfu_config.py,
              board_profile.py, wizard.py, browser.py.
 See also:    ../app.py, ../cli.py, tests/test_app.py
 """
@@ -64,9 +66,6 @@ RELEASE_BUNDLE: Final[str] = "\x00release"
 OTHER_TAG: Final[str] = "\x00tag"
 NO_APP: Final[str] = "\x00none"
 
-# Embassy bootloader reserves 32 KiB for itself, so its app slot starts here
-# (vs. the 16 KiB C bootloader's flasher.APP_BASE_ADDRESS == 0x4000).
-EMBASSY_APP_BASE_ADDRESS: Final[int] = 0x8000
 # ESP32-S3 USB-Serial-JTAG / ROM download PID: a SOLO board, or an ESP-Prog-2 in download mode.
 _MISSING_IMAGE: Final[str] = "none — / f picks one"
 # The SWD targets that flash one image file, and how the browser picks it.
@@ -105,7 +104,7 @@ class Settings:
 
     @property
     def app_base_address(self) -> int:
-        return EMBASSY_APP_BASE_ADDRESS if self.embassy else flasher.APP_BASE_ADDRESS
+        return flasher.EMBASSY_APP_BASE_ADDRESS if self.embassy else flasher.APP_BASE_ADDRESS
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +120,7 @@ class BootFlashJob:
 class AppFlashJob:
     bin_path: Path
     base_address: int
+    embassy: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -502,7 +502,7 @@ def boot_flash_flow(settings: Settings) -> JobFlow:
 
 def app_flash_flow(settings: Settings) -> JobFlow:
     c_base = f"0x{flasher.APP_BASE_ADDRESS:X}"
-    embassy_base = f"0x{EMBASSY_APP_BASE_ADDRESS:X}"
+    embassy_base = f"0x{flasher.EMBASSY_APP_BASE_ADDRESS:X}"
 
     def steps(_answers: Answers) -> list[Step]:
         image = _image_step(
@@ -523,7 +523,9 @@ def app_flash_flow(settings: Settings) -> JobFlow:
     def resolve(answers: Answers) -> tuple[Settings, Job]:
         embassy = answers.get("base") == embassy_base if "base" in answers else settings.embassy
         updated = replace(settings, app_bin=answers.get("image", settings.app_bin), embassy=embassy)
-        return updated, AppFlashJob(Path(updated.app_bin), updated.app_base_address)
+        return updated, AppFlashJob(
+            Path(updated.app_bin), updated.app_base_address, updated.embassy
+        )
 
     subtitle = f"RA4M1 ({flasher.TARGET_TYPE}) over SWD, above the bootloader"
     return _job_flow("Flash the RA4M1 application", subtitle, steps, resolve)
@@ -779,6 +781,13 @@ def summary(job: Job) -> Confirm:
             rows = [
                 ("Chip", f"RA4M1 ({flasher.TARGET_TYPE}) over SWD"),
                 ("Image", str(job.bin_path)),
+            ]
+            try:
+                flasher.check_app_range(base, size, job.embassy)
+            except flasher.AppRangeError as exc:
+                rows.append(("Refused", str(exc)))
+                return Confirm("Flash the RA4M1 application", tuple(rows), "Flash", False)
+            rows += [
                 ("Address", f"0x{base:X}–0x{base + size - 1:X} ({size} bytes)"),
                 ("Erase", f"those sectors only; the bootloader below 0x{base:X} is kept"),
                 ("Metadata", _app_metadata_text(base, size)),

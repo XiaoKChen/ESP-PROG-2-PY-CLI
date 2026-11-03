@@ -10,7 +10,9 @@ the board's cancfg image, optionally plus an app in ota_0. It has no Textual dep
 same logic backs both the TUI and the headless CLI.
 
 Owns:        probe VID/PID and target-type names, the serial-port classification (running
-             bridge = unambiguous, 303A:1001 = candidate only), APP_BASE_ADDRESS, the RA4M1
+             bridge = unambiguous, 303A:1001 = candidate only), APP_BASE_ADDRESS and
+             EMBASSY_APP_BASE_ADDRESS, the RA4M1 code-flash end (RA4M1_CODE_FLASH_END) and the
+             per-bootloader app range an image must lie in (check_app_range), the RA4M1
              bootloader's metadata block (RA4M1_METADATA_ADDRESS, RA4M1_METADATA_SIZE) and
              when an app flash erases it, the PSoC 6 flash and metadata address ranges,
              bundled-asset lookup (hex/, packs/, firmware/), ESPTOOL_SHIM_FLAG (the
@@ -50,6 +52,8 @@ Errors:      FlasherError hierarchy (ProbeNotFoundError; FlashFailedError, also 
              board never reaches ROM download mode or when the target's memory map does not
              put the RA4M1 metadata block in one 2 KB flash sector; BundleError for a bad,
              missing or unfetchable SOLO bundle); FileNotFoundError for a missing image;
+             AppRangeError for an empty RA4M1 app image or an address or size outside the
+             bootloader's app range, raised before any hardware is touched;
              InvalidNameError/InvalidCanIdError from dfu_config and InvalidProfileError from
              board_profile are raised before any hardware is touched.
 Depends on:  dfu_config.py, board_profile.py; pyocd, esptool, pyserial, intelhex and
@@ -69,6 +73,7 @@ flashing the RA4M1 must go through pyOCD, not OpenOCD.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import logging
 import re
@@ -136,12 +141,17 @@ _DOWNLOAD_TIMEOUT_S: Final[int] = 60
 # memory_regions.ld — confirming this bootloader was built from that exact
 # linker layout.
 APP_BASE_ADDRESS: Final[int] = 0x4000
+# Embassy bootloader reserves 32 KiB for itself, so its app slot starts here
+# (vs. the 16 KiB C bootloader's APP_BASE_ADDRESS == 0x4000).
+EMBASSY_APP_BASE_ADDRESS: Final[int] = 0x8000
 # The RA4M1 C bootloader keeps its image record (magic, size, CRC) and an "update in
 # progress" marker in the last 2 KB code-flash sector. A stale record or a leftover marker
 # makes it park in DFU + CAN instead of booting a freshly flashed app; an erased block
 # falls back to the stock SP-word check, so the app boots.
 RA4M1_METADATA_ADDRESS: Final[int] = 0x3F800
 RA4M1_METADATA_SIZE: Final[int] = 0x800
+# RA4M1 code flash is 256 KB (0x0-0x3FFFF); an app image must end by this address.
+RA4M1_CODE_FLASH_END: Final[int] = 0x40000
 
 # PSoC 62S3 main flash (512 KiB). Only this range is ever programmed — never
 # SFLASH (0x16000000) or eFuse.
@@ -209,6 +219,10 @@ class ProbeNotFoundError(FlasherError):
 
 class FlashFailedError(FlasherError):
     """Raised when programming the target or the probe's own firmware fails."""
+
+
+class AppRangeError(FlasherError):
+    """Raised when an RA4M1 app image is empty or outside its bootloader's app range."""
 
 
 class BundleError(FlasherError):
@@ -529,6 +543,32 @@ def _check_metadata_sector(session: Session) -> None:
         )
 
 
+def check_app_range(base_address: int, image_size: int, embassy: bool = False) -> None:
+    """Raise AppRangeError unless a non-empty image lies in the bootloader's app region.
+
+    The region runs from the bootloader's app base (``APP_BASE_ADDRESS``, or
+    ``EMBASSY_APP_BASE_ADDRESS`` with ``embassy``) to ``RA4M1_CODE_FLASH_END``.
+    """
+    if image_size <= 0:
+        raise AppRangeError("Refusing to flash an empty application image (0 bytes).")
+    if base_address < 0:
+        raise AppRangeError(f"Refusing negative app address {base_address}.")
+    lowest, bootloader = (
+        (EMBASSY_APP_BASE_ADDRESS, "Embassy") if embassy else (APP_BASE_ADDRESS, "C")
+    )
+    if base_address < lowest:
+        raise AppRangeError(
+            f"Refusing app address 0x{base_address:X}: below 0x{lowest:X} would overwrite "
+            f"the {bootloader} bootloader."
+        )
+    end = base_address + image_size
+    if end > RA4M1_CODE_FLASH_END:
+        raise AppRangeError(
+            f"Refusing app image at 0x{base_address:X} (0x{image_size:X} bytes): it ends at "
+            f"0x{end:X}, which runs past the end of code flash 0x{RA4M1_CODE_FLASH_END:X}."
+        )
+
+
 def flash_app(
     bin_path: Path,
     unique_id: str | None = None,
@@ -536,6 +576,7 @@ def flash_app(
     base_address: int = APP_BASE_ADDRESS,
     progress: ProgressCallback | None = None,
     log: LogCallback | None = None,
+    embassy: bool = False,
 ) -> None:
     """Program an application ``.bin`` at ``base_address`` and reset. Raises on failure.
 
@@ -556,17 +597,36 @@ def flash_app(
     Raises FlashFailedError before the erase when the target's memory map does not put the
     block in exactly one 2 KB flash sector, since pyOCD would otherwise skip it silently or
     erase app bytes along with it.
+
+    Raises AppRangeError before any hardware is touched unless the image is non-empty and lies
+    between the bootloader's app base and ``RA4M1_CODE_FLASH_END`` (see ``check_app_range``).
+    ``embassy`` selects the Embassy bootloader, whose app base is ``EMBASSY_APP_BASE_ADDRESS``;
+    the range check then makes ``APP_BASE_ADDRESS`` unreachable, so the metadata block at
+    ``RA4M1_METADATA_ADDRESS`` is never erased (only overwritten if the image covers it).
+    The image is read once: the bytes range-checked are the bytes programmed.
     """
     from pyocd.flash.eraser import FlashEraser
     from pyocd.flash.file_programmer import FileProgrammer
 
-    bin_path = Path(bin_path)
-    if not bin_path.is_file():
-        raise FileNotFoundError(f"Application file not found: {bin_path}")
-
     def _log(msg: str) -> None:
         if log is not None:
             log(msg)
+
+    bin_path = Path(bin_path)
+    if not bin_path.is_file():
+        raise FileNotFoundError(f"Application file not found: {bin_path}")
+    data = bin_path.read_bytes()
+    image_size = len(data)
+    # Stopgap until the bootloader is detected from the target (issue #43): an Embassy
+    # user who forgets embassy=True sees which bootloader is being protected.
+    if embassy:
+        _log(f"Protecting the Embassy bootloader below 0x{EMBASSY_APP_BASE_ADDRESS:X}.")
+    else:
+        _log(
+            f"Protecting the C bootloader below 0x{APP_BASE_ADDRESS:X} "
+            "(pass --embassy for an Embassy board)."
+        )
+    check_app_range(base_address, image_size, embassy)
 
     probe = _choose_raw(unique_id)
     if probe is None:
@@ -580,12 +640,11 @@ def flash_app(
         # starts from the same clean state.
         _log("Reset/halt target")
         session.target.reset_and_halt()
-        image_size = bin_path.stat().st_size
         _log(f"Programming {bin_path.name} ({image_size} bytes) @ 0x{base_address:08X}")
         # chip_erase="sector" erases only the pages this .bin touches — the
         # bootloader region below base_address is never erased or written.
         programmer = FileProgrammer(session, progress=progress, chip_erase="sector")
-        programmer.program(str(bin_path), file_format="bin", base_address=base_address)
+        programmer.program(io.BytesIO(data), file_format="bin", base_address=base_address)
         match ra4m1_metadata_action(base_address, image_size):
             case "erase":
                 _check_metadata_sector(session)
