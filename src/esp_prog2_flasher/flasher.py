@@ -47,8 +47,9 @@ Invariants:  a node's config block is only written to the cancfg partition its p
 Concurrency: calls block until hardware I/O finishes; progress and log callbacks fire on the
              calling thread, so the TUI runs these functions in worker threads.
 Errors:      FlasherError hierarchy (ProbeNotFoundError; FlashFailedError, also when a running
-             board never reaches ROM download mode; BundleError for a bad, missing or
-             unfetchable SOLO bundle); FileNotFoundError for a missing image;
+             board never reaches ROM download mode or when the target's memory map does not
+             put the RA4M1 metadata block in one 2 KB flash sector; BundleError for a bad,
+             missing or unfetchable SOLO bundle); FileNotFoundError for a missing image;
              InvalidNameError/InvalidCanIdError from dfu_config and InvalidProfileError from
              board_profile are raised before any hardware is touched.
 Depends on:  dfu_config.py, board_profile.py; pyocd, esptool, pyserial, intelhex and
@@ -194,8 +195,8 @@ EsptoolRunner = Callable[[list[str], ProgressCallback | None, LogCallback | None
 # esptool --after modes: no-reset for every write/verify step; the board is rebooted by a
 # separate final call (_reboot_node_board).
 ResetMode = Literal["no-reset", "watchdog-reset"]
-# What an RA4M1 app flash does to the bootloader's metadata block (see metadata_action).
-MetadataAction = Literal["erase", "covered", "keep"]
+# What an RA4M1 app flash does to the bootloader's metadata block (see ra4m1_metadata_action).
+Ra4m1MetadataAction = Literal["erase", "covered", "keep"]
 
 
 class FlasherError(Exception):
@@ -490,19 +491,42 @@ def flash(
             logger.debug("session close failed for %s", probe.unique_id, exc_info=True)
 
 
-def metadata_action(base_address: int, image_size: int) -> MetadataAction:
+def ra4m1_metadata_action(base_address: int, image_size: int) -> Ra4m1MetadataAction:
     """What an app flash at ``base_address`` does to the RA4M1 bootloader's metadata block.
 
-    ``"keep"`` for any address but ``APP_BASE_ADDRESS`` (e.g. the Embassy bootloader's
-    0x8000, whose layout this tool does not own); ``"covered"`` when the image itself reaches
-    into the block at ``RA4M1_METADATA_ADDRESS``, so there is nothing left to erase;
-    otherwise ``"erase"``.
+    ``"covered"`` when the image overlaps the block at ``RA4M1_METADATA_ADDRESS``, at any base
+    address, so the image itself overwrites it and there is nothing left to erase; otherwise
+    ``"keep"`` for any address but ``APP_BASE_ADDRESS`` (e.g. the Embassy bootloader's 0x8000,
+    whose layout this tool does not own); otherwise ``"erase"``.
     """
+    metadata_end = RA4M1_METADATA_ADDRESS + RA4M1_METADATA_SIZE
+    if base_address < metadata_end and base_address + image_size > RA4M1_METADATA_ADDRESS:
+        return "covered"
     if base_address != APP_BASE_ADDRESS:
         return "keep"
-    if base_address + image_size > RA4M1_METADATA_ADDRESS:
-        return "covered"
     return "erase"
+
+
+def _check_metadata_sector(session: Session) -> None:
+    """Raise FlashFailedError unless the metadata block is exactly one flash sector.
+
+    pyOCD's sector erase never fails on a wrong memory map: it logs and skips an address
+    outside flash, and rounds an unaligned start down to erase a whole larger sector (app
+    bytes included). So the geometry is checked before any erase.
+    """
+    region = session.target.memory_map.get_region_for_address(RA4M1_METADATA_ADDRESS)
+    if region is None or not region.is_flash or region.flash is None:
+        raise FlashFailedError(
+            f"No flash region at the bootloader metadata block 0x{RA4M1_METADATA_ADDRESS:X}; "
+            "refusing to erase it."
+        )
+    sector = region.flash.get_sector_info(RA4M1_METADATA_ADDRESS)
+    if not sector or sector.size != RA4M1_METADATA_SIZE or RA4M1_METADATA_ADDRESS % sector.size:
+        sector_size = f"0x{sector.size:X}" if sector else "unknown"
+        raise FlashFailedError(
+            f"Flash sector at 0x{RA4M1_METADATA_ADDRESS:X} is {sector_size}, not the "
+            f"0x{RA4M1_METADATA_SIZE:X}-byte bootloader metadata block; refusing to erase it."
+        )
 
 
 def flash_app(
@@ -525,8 +549,13 @@ def flash_app(
     (``RA4M1_METADATA_ADDRESS``) so a stale image record or update marker cannot make the
     bootloader park instead of booting the new app. The erase runs after programming, so a
     failed program never leaves an erased block next to a partial app. An image that
-    reaches into the block skips the erase with a warning; any other ``base_address``
-    leaves the block alone (see ``metadata_action``).
+    overlaps the block overwrites it, so the erase is skipped (with a warning at
+    ``APP_BASE_ADDRESS``); any other ``base_address`` skips the erase (see
+    ``ra4m1_metadata_action``).
+
+    Raises FlashFailedError before the erase when the target's memory map does not put the
+    block in exactly one 2 KB flash sector, since pyOCD would otherwise skip it silently or
+    erase app bytes along with it.
     """
     from pyocd.flash.eraser import FlashEraser
     from pyocd.flash.file_programmer import FileProgrammer
@@ -557,8 +586,9 @@ def flash_app(
         # bootloader region below base_address is never erased or written.
         programmer = FileProgrammer(session, progress=progress, chip_erase="sector")
         programmer.program(str(bin_path), file_format="bin", base_address=base_address)
-        match metadata_action(base_address, image_size):
+        match ra4m1_metadata_action(base_address, image_size):
             case "erase":
+                _check_metadata_sector(session)
                 _log(
                     f"Erasing bootloader metadata block @ 0x{RA4M1_METADATA_ADDRESS:08X} "
                     f"({RA4M1_METADATA_SIZE} bytes)"
@@ -566,10 +596,15 @@ def flash_app(
                 FlashEraser(session, FlashEraser.Mode.SECTOR).erase(
                     [(RA4M1_METADATA_ADDRESS, RA4M1_METADATA_ADDRESS + RA4M1_METADATA_SIZE)]
                 )
-            case "covered":
+            case "covered" if base_address == APP_BASE_ADDRESS:
                 _log(
                     "Warning: the image reaches into the bootloader metadata block at "
                     f"0x{RA4M1_METADATA_ADDRESS:X}, so the bootloader treats it as unvalidated."
+                )
+            case "covered":
+                _log(
+                    "The image covers the bootloader metadata block at "
+                    f"0x{RA4M1_METADATA_ADDRESS:X}; no separate erase."
                 )
             case "keep":
                 pass
