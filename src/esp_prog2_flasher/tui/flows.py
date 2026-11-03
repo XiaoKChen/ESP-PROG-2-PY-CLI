@@ -739,6 +739,18 @@ def _migration_range() -> str:
     return f"0x{start:X}–0x{start + flasher.STOCK_MIGRATION_ERASE_SIZE - 1:X}"
 
 
+def _app_metadata_text(action: flasher.MetadataAction) -> str:
+    start = flasher.RA4M1_METADATA_ADDRESS
+    match action:
+        case "erase":
+            end = start + flasher.RA4M1_METADATA_SIZE - 1
+            return f"0x{start:X}–0x{end:X} erased so the bootloader boots the new app"
+        case "covered":
+            return "overwritten by the image; the bootloader treats it as unvalidated"
+        case "keep":
+            return f"0x{start:X} left as is (non-default address)"
+
+
 def summary(job: Job) -> Confirm:
     """What a job will write where — the confirm step's rows, title and verb."""
     rows: list[Field]
@@ -767,6 +779,7 @@ def summary(job: Job) -> Confirm:
                 ("Image", str(job.bin_path)),
                 ("Address", f"0x{base:X}–0x{base + size - 1:X} ({size} bytes)"),
                 ("Erase", f"those sectors only; the bootloader below 0x{base:X} is kept"),
+                ("Metadata", _app_metadata_text(flasher.metadata_action(base, size))),
             ]
             return Confirm("Flash the RA4M1 application", tuple(rows), "Flash")
         case Psoc6FlashJob():

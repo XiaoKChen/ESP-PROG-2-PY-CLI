@@ -10,11 +10,13 @@ the board's cancfg image, optionally plus an app in ota_0. It has no Textual dep
 same logic backs both the TUI and the headless CLI.
 
 Owns:        probe VID/PID and target-type names, the serial-port classification (running
-             bridge = unambiguous, 303A:1001 = candidate only), APP_BASE_ADDRESS, the PSoC 6
-             flash and metadata address ranges, bundled-asset lookup (hex/, packs/, firmware/),
-             ESPTOOL_SHIM_FLAG (the frozen-build esptool re-exec flag dispatched by cli.py),
-             and the node's partition-table offset/entry format, the cancfg partition identity
-             and its fallback offset; the SOLO release bundle (repo, default tag, asset pattern,
+             bridge = unambiguous, 303A:1001 = candidate only), APP_BASE_ADDRESS, the RA4M1
+             bootloader's metadata block (RA4M1_METADATA_ADDRESS, RA4M1_METADATA_SIZE) and
+             when an app flash erases it, the PSoC 6 flash and metadata address ranges,
+             bundled-asset lookup (hex/, packs/, firmware/), ESPTOOL_SHIM_FLAG (the
+             frozen-build esptool re-exec flag dispatched by cli.py), and the node's
+             partition-table offset/entry format, the cancfg partition identity and its
+             fallback offset; the SOLO release bundle (repo, default tag, asset pattern,
              manifest format and its validation), which board-profile record version a bundle
              reads (PROFILE_V2_MIN_BUNDLE_VERSION), the SOLO flash sequence, the otadata
              image that selects ota_0, and the 1200-baud touch that moves a running board
@@ -133,6 +135,12 @@ _DOWNLOAD_TIMEOUT_S: Final[int] = 60
 # memory_regions.ld — confirming this bootloader was built from that exact
 # linker layout.
 APP_BASE_ADDRESS: Final[int] = 0x4000
+# The RA4M1 C bootloader keeps its image record (magic, size, CRC) and an "update in
+# progress" marker in the last 2 KB code-flash sector. A stale record or a leftover marker
+# makes it park in DFU + CAN instead of booting a freshly flashed app; an erased block
+# falls back to the stock SP-word check, so the app boots.
+RA4M1_METADATA_ADDRESS: Final[int] = 0x3F800
+RA4M1_METADATA_SIZE: Final[int] = 0x800
 
 # PSoC 62S3 main flash (512 KiB). Only this range is ever programmed — never
 # SFLASH (0x16000000) or eFuse.
@@ -186,6 +194,8 @@ EsptoolRunner = Callable[[list[str], ProgressCallback | None, LogCallback | None
 # esptool --after modes: no-reset for every write/verify step; the board is rebooted by a
 # separate final call (_reboot_node_board).
 ResetMode = Literal["no-reset", "watchdog-reset"]
+# What an RA4M1 app flash does to the bootloader's metadata block (see metadata_action).
+MetadataAction = Literal["erase", "covered", "keep"]
 
 
 class FlasherError(Exception):
@@ -480,6 +490,21 @@ def flash(
             logger.debug("session close failed for %s", probe.unique_id, exc_info=True)
 
 
+def metadata_action(base_address: int, image_size: int) -> MetadataAction:
+    """What an app flash at ``base_address`` does to the RA4M1 bootloader's metadata block.
+
+    ``"keep"`` for any address but ``APP_BASE_ADDRESS`` (e.g. the Embassy bootloader's
+    0x8000, whose layout this tool does not own); ``"covered"`` when the image itself reaches
+    into the block at ``RA4M1_METADATA_ADDRESS``, so there is nothing left to erase;
+    otherwise ``"erase"``.
+    """
+    if base_address != APP_BASE_ADDRESS:
+        return "keep"
+    if base_address + image_size > RA4M1_METADATA_ADDRESS:
+        return "covered"
+    return "erase"
+
+
 def flash_app(
     bin_path: Path,
     unique_id: str | None = None,
@@ -495,7 +520,15 @@ def flash_app(
     the already-flashed bootloader is left untouched. A ``.bin`` carries no
     embedded load address, so ``base_address`` (default ``APP_BASE_ADDRESS``) is
     passed explicitly to pyOCD's ``FileProgrammer``.
+
+    At ``APP_BASE_ADDRESS`` it then erases the bootloader's metadata block
+    (``RA4M1_METADATA_ADDRESS``) so a stale image record or update marker cannot make the
+    bootloader park instead of booting the new app. The erase runs after programming, so a
+    failed program never leaves an erased block next to a partial app. An image that
+    reaches into the block skips the erase with a warning; any other ``base_address``
+    leaves the block alone (see ``metadata_action``).
     """
+    from pyocd.flash.eraser import FlashEraser
     from pyocd.flash.file_programmer import FileProgrammer
 
     bin_path = Path(bin_path)
@@ -518,13 +551,28 @@ def flash_app(
         # starts from the same clean state.
         _log("Reset/halt target")
         session.target.reset_and_halt()
-        _log(
-            f"Programming {bin_path.name} ({bin_path.stat().st_size} bytes) @ 0x{base_address:08X}"
-        )
+        image_size = bin_path.stat().st_size
+        _log(f"Programming {bin_path.name} ({image_size} bytes) @ 0x{base_address:08X}")
         # chip_erase="sector" erases only the pages this .bin touches — the
         # bootloader region below base_address is never erased or written.
         programmer = FileProgrammer(session, progress=progress, chip_erase="sector")
         programmer.program(str(bin_path), file_format="bin", base_address=base_address)
+        match metadata_action(base_address, image_size):
+            case "erase":
+                _log(
+                    f"Erasing bootloader metadata block @ 0x{RA4M1_METADATA_ADDRESS:08X} "
+                    f"({RA4M1_METADATA_SIZE} bytes)"
+                )
+                FlashEraser(session, FlashEraser.Mode.SECTOR).erase(
+                    [(RA4M1_METADATA_ADDRESS, RA4M1_METADATA_ADDRESS + RA4M1_METADATA_SIZE)]
+                )
+            case "covered":
+                _log(
+                    "Warning: the image reaches into the bootloader metadata block at "
+                    f"0x{RA4M1_METADATA_ADDRESS:X}, so the bootloader treats it as unvalidated."
+                )
+            case "keep":
+                pass
         _log("Resetting target")
         session.target.reset()
         _log("Done.")

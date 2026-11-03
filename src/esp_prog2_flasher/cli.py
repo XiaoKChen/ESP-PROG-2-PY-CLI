@@ -107,7 +107,9 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="BIN",
         help="Flash an application .bin to the RA4M1 target over SWD, then exit. Programs "
         "the application region only (never the bootloader) — flash the bootloader with "
-        "--flash first.",
+        "--flash first. At the default --app-address it also erases the bootloader's "
+        f"metadata block at 0x{flasher.RA4M1_METADATA_ADDRESS:X} so the bootloader boots the "
+        "new app; other addresses leave that block alone.",
     )
     p.add_argument(
         "--app-address",
