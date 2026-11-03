@@ -18,7 +18,8 @@ Invariants:  the node flags and --flash-solo never auto-detect a port — auto-d
              with --flash-solo. --flash-probe without --port only takes the running bridge: when
              just 303A:1001 ports exist (ESP-Prog-2 in download mode or a SOLO board) it lists
              them and exits 2.
-Errors:      invalid or conflicting arguments exit with code 2; a failed flash, download, bundle
+Errors:      invalid or conflicting arguments exit with code 2, as does a --flash-app image
+             or address outside the bootloader's app range; a failed flash, download, bundle
              fetch or node read logs the exception, prints to stderr and exits with code 1; --detect
              exits 2 only when no probe is found, otherwise 0; --read-node-config exits 0 for
              both a provisioned and an unprovisioned node.
@@ -118,7 +119,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--embassy",
         action="store_true",
         help="With --flash-app: the board runs the Embassy bootloader "
-        f"(0x0–0x{flasher.EMBASSY_APP_BASE_ADDRESS - 1:X}); the app goes to "
+        f"(0x0-0x{flasher.EMBASSY_APP_BASE_ADDRESS - 1:X}); the app goes to "
         f"0x{flasher.EMBASSY_APP_BASE_ADDRESS:X}, nothing below "
         f"0x{flasher.EMBASSY_APP_BASE_ADDRESS:X} is written, and the C bootloader's metadata "
         "block is never erased.",
@@ -577,6 +578,9 @@ def main() -> None:
                 log=print,
                 embassy=args.embassy,
             )
+        except flasher.AppRangeError as exc:
+            print(f"Application flash refused: {exc}", file=sys.stderr)
+            sys.exit(2)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Application flash failed")
             print(f"Application flash failed: {exc}", file=sys.stderr)

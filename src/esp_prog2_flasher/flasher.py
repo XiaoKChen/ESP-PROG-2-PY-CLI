@@ -13,9 +13,8 @@ Owns:        probe VID/PID and target-type names, the serial-port classification
              bridge = unambiguous, 303A:1001 = candidate only), APP_BASE_ADDRESS and
              EMBASSY_APP_BASE_ADDRESS, the RA4M1 code-flash end (RA4M1_CODE_FLASH_END) and the
              per-bootloader app range an image must lie in (check_app_range), the RA4M1
-             bootloader's metadata block
-             (RA4M1_METADATA_ADDRESS, RA4M1_METADATA_SIZE) and when an app flash erases it,
-             the PSoC 6 flash and metadata address ranges,
+             bootloader's metadata block (RA4M1_METADATA_ADDRESS, RA4M1_METADATA_SIZE) and
+             when an app flash erases it, the PSoC 6 flash and metadata address ranges,
              bundled-asset lookup (hex/, packs/, firmware/), ESPTOOL_SHIM_FLAG (the
              frozen-build esptool re-exec flag dispatched by cli.py), and the node's
              partition-table offset/entry format, the cancfg partition identity and its
