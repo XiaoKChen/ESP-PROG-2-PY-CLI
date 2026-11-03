@@ -2,7 +2,8 @@
 
 Covers:       --version printing the package version and exiting 0; --provision-node keeping a
               SOLO preset's board profile in the cancfg image, and writing the v2 block alone
-              for any other product.
+              for any other product; --flash-app resolving --app-address to 0x4000, or to 0x8000
+              with --embassy, and passing --embassy through to flash_app.
 Not covered:  argument parsing as a whole; esptool runs (tests/test_flasher.py).
 See also:     src/esp_prog2_flasher/cli.py, src/esp_prog2_flasher/board_profile.py
 """
@@ -10,6 +11,8 @@ See also:     src/esp_prog2_flasher/cli.py, src/esp_prog2_flasher/board_profile.
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -82,3 +85,30 @@ def test_read_node_config_says_when_there_is_no_board_profile(
     out = capsys.readouterr().out
     assert "unprovisioned/invalid" in out
     assert "Board profile: no board profile (updater defaults: TWAI tx GPIO4" in out
+
+
+@pytest.mark.parametrize(
+    ("argv", "base_address", "embassy"),
+    [
+        ([], flasher.APP_BASE_ADDRESS, False),
+        (["--embassy"], flasher.EMBASSY_APP_BASE_ADDRESS, True),
+        (["--app-address", "0x9000"], 0x9000, False),
+        (["--embassy", "--app-address", "0x9000"], 0x9000, True),
+    ],
+    ids=["default", "embassy", "explicit", "embassy-explicit"],
+)
+def test_flash_app_resolves_the_app_address_and_passes_embassy_through(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    argv: list[str],
+    base_address: int,
+    embassy: bool,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(flasher, "flash_app", lambda *_a, **kw: calls.append(kw))
+    image = tmp_path / "app.bin"
+    monkeypatch.setattr(sys, "argv", ["esp-prog2-flasher", "--flash-app", str(image), *argv])
+    cli.main()
+    assert len(calls) == 1
+    assert calls[0]["base_address"] == base_address
+    assert calls[0]["embassy"] is embassy

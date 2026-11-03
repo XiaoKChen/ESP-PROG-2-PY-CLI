@@ -106,21 +106,32 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="BIN",
         help="Flash an application .bin to the RA4M1 target over SWD, then exit. Programs "
-        "the application region only (never the bootloader) — flash the bootloader with "
-        "--flash first. At the default --app-address it also erases the bootloader's "
-        f"metadata block at 0x{flasher.RA4M1_METADATA_ADDRESS:X} so the bootloader boots the "
-        "new app; other addresses skip that erase (the image itself may still cover the "
-        "block).",
+        "the application region only: the C bootloader below "
+        f"0x{flasher.APP_BASE_ADDRESS:X} is kept, or the Embassy bootloader below "
+        f"0x{flasher.EMBASSY_APP_BASE_ADDRESS:X} with --embassy. Flash the bootloader with "
+        "--flash first. With the C bootloader at the default --app-address it also erases the "
+        f"bootloader's metadata block at 0x{flasher.RA4M1_METADATA_ADDRESS:X} so the bootloader "
+        "boots the new app; other addresses skip that erase (the image itself may still cover "
+        "the block).",
+    )
+    p.add_argument(
+        "--embassy",
+        action="store_true",
+        help="With --flash-app: the board runs the Embassy bootloader "
+        f"(0x0–0x{flasher.EMBASSY_APP_BASE_ADDRESS - 1:X}); the app goes to "
+        f"0x{flasher.EMBASSY_APP_BASE_ADDRESS:X}, nothing below "
+        f"0x{flasher.EMBASSY_APP_BASE_ADDRESS:X} is written, and the C bootloader's metadata "
+        "block is never erased.",
     )
     p.add_argument(
         "--app-address",
         type=lambda text: int(text, 0),
-        default=flasher.APP_BASE_ADDRESS,
+        default=None,
         metavar="ADDR",
         help="Base address for --flash-app (hex like 0x4000 or decimal). Default: "
         f"0x{flasher.APP_BASE_ADDRESS:X} (the ArduinoCore-renesas UNO R4 Minima sketch "
-        "load address). Must be at least "
-        f"0x{flasher.APP_BASE_ADDRESS:X}, and the image must end by "
+        f"load address), or 0x{flasher.EMBASSY_APP_BASE_ADDRESS:X} with --embassy. Must be at "
+        "least the bootloader's app base, and the image must end by "
         f"0x{flasher.RA4M1_CODE_FLASH_END:X}.",
     )
     p.add_argument(
@@ -553,12 +564,18 @@ def main() -> None:
         return
 
     if args.flash_app:
+        base_address = args.app_address
+        if base_address is None:
+            base_address = (
+                flasher.EMBASSY_APP_BASE_ADDRESS if args.embassy else flasher.APP_BASE_ADDRESS
+            )
         try:
             flasher.flash_app(
                 args.flash_app,
                 frequency=args.freq,
-                base_address=args.app_address,
+                base_address=base_address,
                 log=print,
+                embassy=args.embassy,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Application flash failed")
