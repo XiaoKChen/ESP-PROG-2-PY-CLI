@@ -11,7 +11,8 @@ Covers:       mounting at 80x24 and 120x40 with every panel and every target's d
               cli.py's --flash-solo), provision and read config like --provision-node and
               --read-node-config; the RA4M1 bootloader wizard with a known and a custom device;
               the RA4M1 app flash confirm's Metadata row (erase, covered, keep) on one line of
-              the 80x24 confirm pane;
+              the 80x24 confirm pane, and its Refused row (no Address or Metadata, y ignored) for
+              an image outside the bootloader's app range;
               shift+tab and "/" typed into a field; the browser's filter and pick; a finished
               run's Recent row and status; the help table built from the command table; the
               busy guard; ctrl+c; the terminal theme choice; the saved state (restore on launch,
@@ -262,6 +263,31 @@ def test_app_flash_confirm_says_what_happens_to_the_metadata_block_on_one_line(
         rows = app.screen.query_one("#confirm-rows", DetailsView)
         label_width = max(cell_len(label) for label, _ in confirm.rows)
         assert label_width + 2 + cell_len(metadata) <= rows.content_size.width
+
+    run_app(check)
+
+
+def test_app_flash_confirm_refuses_an_out_of_range_image_and_ignores_y(tmp_path: Path) -> None:
+    image = tmp_path / "app.bin"
+    with image.open("wb") as file:
+        file.truncate(0x38001)
+    confirm = flows.summary(AppFlashJob(image, flows.Settings(embassy=True).app_base_address))
+    labels = [label for label, _ in confirm.rows]
+    assert "Refused" in labels
+    assert "Address" not in labels and "Metadata" not in labels
+    assert not confirm.actionable
+
+    async def check(app: FlasherApp, pilot: Pilot[None]) -> None:
+        spec = WizardSpec(confirm.title, "", lambda _answers: [], lambda _answers: confirm)
+        app.push_screen(WizardScreen(ChromeState(version="test"), spec))
+        await pilot.pause()
+        screen = app.screen
+        rows = screen.query_one("#confirm-rows", DetailsView)
+        assert rows.region.bottom <= app.size.height
+        assert screen.query_one("#confirm-prompt").region.bottom <= app.size.height
+        await pilot.press("y")
+        await pilot.pause()
+        assert app.screen is screen
 
     run_app(check)
 

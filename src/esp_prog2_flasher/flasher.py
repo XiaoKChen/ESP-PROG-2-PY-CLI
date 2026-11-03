@@ -53,7 +53,7 @@ Errors:      FlasherError hierarchy (ProbeNotFoundError; FlashFailedError, also 
              board never reaches ROM download mode or when the target's memory map does not
              put the RA4M1 metadata block in one 2 KB flash sector; BundleError for a bad,
              missing or unfetchable SOLO bundle); FileNotFoundError for a missing image;
-             FlasherError for an empty RA4M1 app image or an address or size outside the
+             AppRangeError for an empty RA4M1 app image or an address or size outside the
              bootloader's app range, raised before any hardware is touched;
              InvalidNameError/InvalidCanIdError from dfu_config and InvalidProfileError from
              board_profile are raised before any hardware is touched.
@@ -219,6 +219,10 @@ class ProbeNotFoundError(FlasherError):
 
 class FlashFailedError(FlasherError):
     """Raised when programming the target or the probe's own firmware fails."""
+
+
+class AppRangeError(FlasherError):
+    """Raised when an RA4M1 app image is empty or outside its bootloader's app range."""
 
 
 class BundleError(FlasherError):
@@ -540,26 +544,26 @@ def _check_metadata_sector(session: Session) -> None:
 
 
 def check_app_range(base_address: int, image_size: int, embassy: bool = False) -> None:
-    """Raise FlasherError unless a non-empty image lies in the bootloader's app region.
+    """Raise AppRangeError unless a non-empty image lies in the bootloader's app region.
 
     The region runs from the bootloader's app base (``APP_BASE_ADDRESS``, or
     ``EMBASSY_APP_BASE_ADDRESS`` with ``embassy``) to ``RA4M1_CODE_FLASH_END``.
     """
     if image_size <= 0:
-        raise FlasherError("Refusing to flash an empty application image (0 bytes).")
+        raise AppRangeError("Refusing to flash an empty application image (0 bytes).")
     if base_address < 0:
-        raise FlasherError(f"Refusing negative app address {base_address}.")
+        raise AppRangeError(f"Refusing negative app address {base_address}.")
     lowest, bootloader = (
         (EMBASSY_APP_BASE_ADDRESS, "Embassy") if embassy else (APP_BASE_ADDRESS, "C")
     )
     if base_address < lowest:
-        raise FlasherError(
+        raise AppRangeError(
             f"Refusing app address 0x{base_address:X}: below 0x{lowest:X} would overwrite "
             f"the {bootloader} bootloader."
         )
     end = base_address + image_size
     if end > RA4M1_CODE_FLASH_END:
-        raise FlasherError(
+        raise AppRangeError(
             f"Refusing app image at 0x{base_address:X} (0x{image_size:X} bytes): it ends at "
             f"0x{end:X}, which runs past the end of code flash 0x{RA4M1_CODE_FLASH_END:X}."
         )
@@ -594,7 +598,7 @@ def flash_app(
     block in exactly one 2 KB flash sector, since pyOCD would otherwise skip it silently or
     erase app bytes along with it.
 
-    Raises FlasherError before any hardware is touched unless the image is non-empty and lies
+    Raises AppRangeError before any hardware is touched unless the image is non-empty and lies
     between the bootloader's app base and ``RA4M1_CODE_FLASH_END`` (see ``check_app_range``).
     ``embassy`` selects the Embassy bootloader, whose app base is ``EMBASSY_APP_BASE_ADDRESS``;
     the range check then makes ``APP_BASE_ADDRESS`` unreachable, so the metadata block at

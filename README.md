@@ -184,7 +184,9 @@ the chip or board, the image(s), the address range or layout, for an RA4M1
 application what happens to the bootloader's metadata block at `0x3F800`
 (erased, overwritten by the image or left as is) and, for config writes, the
 manufacturer, product and CAN IDs. **`y`** starts the write,
-**`n`** or **`esc`** cancels. Reading a config, detecting and downloading the
+**`n`** or **`esc`** cancels. An application image outside the bootloader's app
+range (or empty) shows a **Refused** row instead, and `y` does nothing: only
+`n` or `esc` leaves. Reading a config, detecting and downloading the
 official image never ask. A running job shows a spinner, a progress bar and
 its log; `esc` goes back to the dashboard while it keeps running, and no
 other write starts until it finishes. When it ends, the result shows in the

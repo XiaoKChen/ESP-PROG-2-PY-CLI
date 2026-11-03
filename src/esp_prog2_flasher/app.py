@@ -454,7 +454,7 @@ class FlasherApp(App[None]):
             case flows.AppFlashJob():
                 name = job.bin_path.name
                 self._begin_job(target, operation, name, title, f"Flashing application {name}")
-                self.flash_app_worker(job.bin_path, job.base_address)
+                self.flash_app_worker(job.bin_path, job.base_address, job.embassy)
             case flows.Psoc6FlashJob():
                 name = job.hex_path.name
                 self._begin_job(target, operation, name, title, f"Flashing PSoC 6 {name}")
@@ -565,16 +565,20 @@ class FlasherApp(App[None]):
             self.call_from_thread(self._job_done, False, f"Target flash failed: {exc!r}")
 
     @work(thread=True, exclusive=True, group=_FLASH_GROUP)
-    def flash_app_worker(self, bin_path: Path, base_address: int) -> None:
+    def flash_app_worker(self, bin_path: Path, base_address: int, embassy: bool) -> None:
         try:
             flasher.flash_app(
                 bin_path,
                 base_address=base_address,
+                embassy=embassy,
                 frequency=self._frequency,
                 progress=lambda f: self.call_from_thread(self._set_progress, f * 100.0),
                 log=self._worker_log,
             )
             self.call_from_thread(self._job_done, True, "Application flashed and reset.")
+        except flasher.AppRangeError as exc:
+            logger.warning("Application flash refused: %s", exc)
+            self.call_from_thread(self._job_done, False, f"Application flash refused: {exc}")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Flash app worker failed")
             self.call_from_thread(self._job_done, False, f"Application flash failed: {exc!r}")

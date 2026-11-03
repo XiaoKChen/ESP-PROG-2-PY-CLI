@@ -119,6 +119,11 @@ class AppFlashJob:
     bin_path: Path
     base_address: int
 
+    @property
+    def embassy(self) -> bool:
+        # The wizard offers only the two bootloaders' app bases, so the base says which one.
+        return self.base_address == flasher.EMBASSY_APP_BASE_ADDRESS
+
 
 @dataclass(frozen=True, slots=True)
 class Psoc6FlashJob:
@@ -776,6 +781,13 @@ def summary(job: Job) -> Confirm:
             rows = [
                 ("Chip", f"RA4M1 ({flasher.TARGET_TYPE}) over SWD"),
                 ("Image", str(job.bin_path)),
+            ]
+            try:
+                flasher.check_app_range(base, size, job.embassy)
+            except flasher.AppRangeError as exc:
+                rows.append(("Refused", str(exc)))
+                return Confirm("Flash the RA4M1 application", tuple(rows), "Flash", False)
+            rows += [
                 ("Address", f"0x{base:X}–0x{base + size - 1:X} ({size} bytes)"),
                 ("Erase", f"those sectors only; the bootloader below 0x{base:X} is kept"),
                 ("Metadata", _app_metadata_text(base, size)),
