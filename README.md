@@ -237,7 +237,7 @@ uv run esp-prog2-flasher --flash --product "IDU Controller" --manufacturer "Acme
 uv run esp-prog2-flasher --flash --product "My Custom Board" --boot-cmd-id 0x700 --boot-reply-id 0x701
 
 uv run esp-prog2-flasher --flash-app path/to/firmware.bin        # flash an app .bin to the RA4M1 app region (0x4000), erase the metadata block at 0x3F800
-uv run esp-prog2-flasher --flash-app path/to/firmware.bin --app-address 0x8000   # override the base address; skips the 0x3F800 erase (the image may still cover it)
+uv run esp-prog2-flasher --flash-app path/to/firmware.bin --app-address 0x8000   # override the base address; skips the 0x3F800 erase (the image may still cover it); the address must be at least 0x4000 and the image must end by 0x40000, or nothing is flashed
 
 uv run esp-prog2-flasher --detect --psoc6   # detect a PSoC 6 target (IDU Radar) instead of the RA4M1
 uv run esp-prog2-flasher --flash-psoc6      # flash the PSoC 6 with the bundled hex (bootloader + App1)

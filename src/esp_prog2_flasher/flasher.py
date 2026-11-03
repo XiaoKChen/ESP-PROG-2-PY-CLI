@@ -11,6 +11,8 @@ same logic backs both the TUI and the headless CLI.
 
 Owns:        probe VID/PID and target-type names, the serial-port classification (running
              bridge = unambiguous, 303A:1001 = candidate only), APP_BASE_ADDRESS, the RA4M1
+             code-flash end (RA4M1_CODE_FLASH_END) and the rule that an app image must lie
+             between the two (check_app_range), the RA4M1
              bootloader's metadata block (RA4M1_METADATA_ADDRESS, RA4M1_METADATA_SIZE) and
              when an app flash erases it, the PSoC 6 flash and metadata address ranges,
              bundled-asset lookup (hex/, packs/, firmware/), ESPTOOL_SHIM_FLAG (the
@@ -50,6 +52,8 @@ Errors:      FlasherError hierarchy (ProbeNotFoundError; FlashFailedError, also 
              board never reaches ROM download mode or when the target's memory map does not
              put the RA4M1 metadata block in one 2 KB flash sector; BundleError for a bad,
              missing or unfetchable SOLO bundle); FileNotFoundError for a missing image;
+             FlasherError for an RA4M1 app address or size outside the app region, raised
+             before any hardware is touched;
              InvalidNameError/InvalidCanIdError from dfu_config and InvalidProfileError from
              board_profile are raised before any hardware is touched.
 Depends on:  dfu_config.py, board_profile.py; pyocd, esptool, pyserial, intelhex and
@@ -142,6 +146,8 @@ APP_BASE_ADDRESS: Final[int] = 0x4000
 # falls back to the stock SP-word check, so the app boots.
 RA4M1_METADATA_ADDRESS: Final[int] = 0x3F800
 RA4M1_METADATA_SIZE: Final[int] = 0x800
+# RA4M1 code flash is 256 KB (0x0-0x3FFFF); an app image must end by this address.
+RA4M1_CODE_FLASH_END: Final[int] = 0x40000
 
 # PSoC 62S3 main flash (512 KiB). Only this range is ever programmed — never
 # SFLASH (0x16000000) or eFuse.
@@ -529,6 +535,21 @@ def _check_metadata_sector(session: Session) -> None:
         )
 
 
+def check_app_range(base_address: int, image_size: int) -> None:
+    """Raise FlasherError unless the image lies within ``APP_BASE_ADDRESS`` to code-flash end."""
+    if base_address < APP_BASE_ADDRESS:
+        raise FlasherError(
+            f"Refusing app address 0x{base_address:X}: below 0x{APP_BASE_ADDRESS:X} "
+            "would overwrite the bootloader."
+        )
+    end = base_address + image_size
+    if end > RA4M1_CODE_FLASH_END:
+        raise FlasherError(
+            f"Refusing app image at 0x{base_address:X} (0x{image_size:X} bytes): it ends at "
+            f"0x{end:X}, which runs past the end of code flash 0x{RA4M1_CODE_FLASH_END:X}."
+        )
+
+
 def flash_app(
     bin_path: Path,
     unique_id: str | None = None,
@@ -556,6 +577,9 @@ def flash_app(
     Raises FlashFailedError before the erase when the target's memory map does not put the
     block in exactly one 2 KB flash sector, since pyOCD would otherwise skip it silently or
     erase app bytes along with it.
+
+    Raises FlasherError before any hardware is touched unless the image lies between
+    ``APP_BASE_ADDRESS`` and ``RA4M1_CODE_FLASH_END`` (see ``check_app_range``).
     """
     from pyocd.flash.eraser import FlashEraser
     from pyocd.flash.file_programmer import FileProgrammer
@@ -563,6 +587,7 @@ def flash_app(
     bin_path = Path(bin_path)
     if not bin_path.is_file():
         raise FileNotFoundError(f"Application file not found: {bin_path}")
+    check_app_range(base_address, bin_path.stat().st_size)
 
     def _log(msg: str) -> None:
         if log is not None:

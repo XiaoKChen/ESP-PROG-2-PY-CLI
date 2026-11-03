@@ -119,7 +119,9 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="ADDR",
         help="Base address for --flash-app (hex like 0x4000 or decimal). Default: "
         f"0x{flasher.APP_BASE_ADDRESS:X} (the ArduinoCore-renesas UNO R4 Minima sketch "
-        "load address).",
+        "load address). Must be at least "
+        f"0x{flasher.APP_BASE_ADDRESS:X}, and the image must end by "
+        f"0x{flasher.RA4M1_CODE_FLASH_END:X}.",
     )
     p.add_argument(
         "--flash-probe",
