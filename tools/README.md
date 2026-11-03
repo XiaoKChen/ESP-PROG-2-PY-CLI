@@ -15,7 +15,7 @@ needs no pack.
    bare `pyocd` CLI use (this `pyocd.yaml`), point pyOCD at it explicitly:
 
    ```sh
-   uv run pyocd flash --pack packs/Renesas.RA_DFP.slim.pack -t r7fa4m1ab hex/dfu_minima.hex
+   uv run pyocd flash --pack packs/Renesas.RA_DFP.slim.pack -t r7fa4m1ab hex/bootloader-uno_r4.hex
    ```
 
 3. **The ESP-Prog-2 probe**, enumerated as a CMSIS-DAP device

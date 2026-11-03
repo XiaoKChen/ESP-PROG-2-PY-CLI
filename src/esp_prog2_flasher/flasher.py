@@ -64,7 +64,7 @@ See also:    tests/test_psoc6.py, tests/test_dfu_config.py, tests/test_flasher.p
 
 The proven, equivalent pyOCD command-line path for the RA4M1 is:
 
-    pyocd flash -t r7fa4m1ab dfu_minima.hex
+    pyocd flash -t r7fa4m1ab bootloader-uno_r4.hex
 
 Note: the installed OpenOCD build lacks the ``renesas_ra`` flash driver, so
 flashing the RA4M1 must go through pyOCD, not OpenOCD.
@@ -119,7 +119,9 @@ DEFAULT_BAUD_RATE: Final[int] = 921600
 # instead of parsing it as a normal CLI flag. See flash_probe().
 ESPTOOL_SHIM_FLAG: Final[str] = "--esptool-shim"
 
-_HEX_NAME = "dfu_minima.hex"
+_HEX_NAME = "bootloader-uno_r4.hex"
+# Embedded-CAN-Bootloaders release the bundled hex/bootloader-uno_r4.hex came from.
+BUNDLED_BOOTLOADER_TAG: Final[str] = "c-cpp-ra4m1-v1.2.0"
 _PSOC6_HEX_NAME = "psoc6_radar_full_image.hex"
 # Slim Renesas.RA_DFP CMSIS pack (pdsc + RA4M1 flash algorithms only) bundled so
 # pyOCD can resolve the r7fa4m1ab target offline — without the pack first being
@@ -136,7 +138,7 @@ _DOWNLOAD_TIMEOUT_S: Final[int] = 60
 # and fsp.ld uses it as the sketch's FLASH region origin — this is the address a
 # PlatformIO/Arduino build for this board is linked at, i.e. "where pio upload
 # writes it". Verified against the bootloader bundled in this repo
-# (hex/dfu_minima.hex): its code ends at 0x3088 (well under 0x4000) and its ID
+# (hex/bootloader-uno_r4.hex): its code ends at 0x3B84 (well under 0x4000) and its ID
 # Code block write lands at 0x01010018, matching ID_CODE_START in that same
 # memory_regions.ld — confirming this bootloader was built from that exact
 # linker layout.
@@ -252,7 +254,7 @@ def _find_bundled(*parts: str) -> Path | None:
 
 
 def find_default_hex() -> Path | None:
-    """Locate the bundled ``hex/dfu_minima.hex`` regardless of how we were launched."""
+    """Locate the bundled ``hex/bootloader-uno_r4.hex`` regardless of how we were launched."""
     return _find_bundled("hex", _HEX_NAME)
 
 
