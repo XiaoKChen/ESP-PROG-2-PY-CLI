@@ -16,7 +16,7 @@ See also:    scripts/build.sh, scripts/build.ps1, src/esp_prog2_flasher/flasher.
 from PyInstaller.utils.hooks import collect_all, collect_entry_point
 
 datas = [
-    ("hex/dfu_minima.hex", "hex"),
+    ("hex/bootloader-uno_r4.hex", "hex"),
     ("hex/psoc6_radar_full_image.hex", "hex"),
     ("firmware/esp-prog2.bin", "firmware"),
     # Slim RA_DFP CMSIS pack so pyOCD resolves the r7fa4m1ab target offline,

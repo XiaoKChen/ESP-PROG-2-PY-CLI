@@ -6,7 +6,9 @@ Covers:       default_state_path per platform; save/load round trip of settings,
               Recent runs, selection and folded groups; a missing file; corrupt, foreign and
               future-version files being ignored with a reason and left alone; fields of the
               wrong type keeping their defaults; custom-only CAN IDs; atomic writes leaving no
-              temp file; forget_state; restore_settings falling back for vanished paths;
+              temp file; forget_state; restore_settings falling back for vanished paths,
+              replacing a PyInstaller temp image silently and the legacy bundled bootloader with a
+              report, and keeping an explicit image;
               remember_picked_files ordering, de-duplication and cap.
 Not covered:  when the app saves or loads, and its status lines (tests/test_app.py).
 See also:     src/esp_prog2_flasher/tui/state.py
@@ -205,6 +207,35 @@ def test_an_empty_saved_image_takes_the_default_without_a_complaint() -> None:
     defaults = replace(Settings(), boot_hex="bundled.hex")
     restored, missing = state.restore_settings(replace(defaults, boot_hex=""), defaults)
     assert restored.boot_hex == "bundled.hex" and missing == []
+
+
+def test_a_pyinstaller_temp_image_is_replaced_silently(tmp_path: Path) -> None:
+    temp_image = tmp_path / "_MEI123456" / "hex" / "bootloader-uno_r4.hex"
+    temp_image.parent.mkdir(parents=True)
+    temp_image.write_text("x", encoding="utf-8")
+    defaults = replace(Settings(), boot_hex="bundled.hex", psoc6_hex="bundled-psoc.hex")
+    saved = replace(defaults, boot_hex=str(temp_image), psoc6_hex=str(temp_image))
+    restored, missing = state.restore_settings(saved, defaults)
+    assert restored.boot_hex == "bundled.hex" and restored.psoc6_hex == "bundled-psoc.hex"
+    assert missing == []
+
+
+def test_the_legacy_bundled_bootloader_is_replaced_and_reported(tmp_path: Path) -> None:
+    legacy = tmp_path / "hex" / state.LEGACY_BUNDLED_HEX_NAME
+    legacy.parent.mkdir()
+    legacy.write_text("x", encoding="utf-8")
+    defaults = replace(Settings(), boot_hex="bundled.hex")
+    restored, missing = state.restore_settings(replace(defaults, boot_hex=str(legacy)), defaults)
+    assert restored.boot_hex == "bundled.hex"
+    assert len(missing) == 1 and state.LEGACY_BUNDLED_HEX_NAME in missing[0]
+
+
+def test_an_explicit_existing_image_is_kept(tmp_path: Path) -> None:
+    chosen = tmp_path / "my-bootloader.hex"
+    chosen.write_text("x", encoding="utf-8")
+    defaults = replace(Settings(), boot_hex="bundled.hex")
+    restored, missing = state.restore_settings(replace(defaults, boot_hex=str(chosen)), defaults)
+    assert restored.boot_hex == str(chosen) and missing == []
 
 
 def test_a_changed_image_becomes_the_newest_recent_file_once() -> None:

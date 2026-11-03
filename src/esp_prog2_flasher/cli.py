@@ -152,7 +152,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--hex",
         type=Path,
         default=None,
-        help="Path to the .hex for --flash (default: bundled hex/dfu_minima.hex) or "
+        help=f"Path to the .hex for --flash (default: bundled hex/{flasher.HEX_NAME}, "
+        f"Embedded-CAN-Bootloaders {flasher.BUNDLED_BOOTLOADER_TAG}) or "
         "--flash-psoc6 (default: bundled hex/psoc6_radar_full_image.hex).",
     )
     p.add_argument(

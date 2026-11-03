@@ -4,7 +4,7 @@
 # (no -t flag needed), e.g. from the project root:
 #
 #   pyocd list
-#   pyocd flash hex/dfu_minima.hex
+#   pyocd flash hex/bootloader-uno_r4.hex
 #   pyocd reset
 #
 # The Python TUI/CLI in this project applies the same options programmatically.

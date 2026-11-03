@@ -22,8 +22,9 @@ Covers:       flash_solo (both presets, migrate-stock erase, app + otadata, --af
               _check_metadata_sector refusing a missing region or a sector other than 2 KB,
               check_app_range (below the bootloader's app base for the C and Embassy
               bootloaders, past code-flash end, an empty image, a negative address, and the
-              issue #39 metadata-sized image), and flash_app refusing each before any probe is
-              chosen.
+              issue #39 metadata-sized image), flash_app refusing each before any probe is chosen,
+              and the bundled RA4M1 bootloader hex (found, and pinned to its release
+              by segments and a content digest, below the app base).
 Not covered:  real esptool runs against a board, a real 1200-baud touch or port listing, the
               real gh download, the pyOCD paths (the metadata erase itself included).
 See also:     src/esp_prog2_flasher/flasher.py, tests/test_board_profile.py
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 import copy
 import functools
+import hashlib
 import json
 import struct
 import subprocess
@@ -43,7 +45,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from intelhex import IntelHex
 
+from esp_prog2_flasher import flasher
 from esp_prog2_flasher.board_profile import (
     CANCFG_IMAGE_SIZE,
     PROFILE_RECORD_MAX_SIZE,
@@ -1107,3 +1111,38 @@ def test_flash_app_refuses_a_bad_address_before_choosing_a_probe(
 
     with pytest.raises(AppRangeError):
         flash_app(image, base_address=base_address, embassy=embassy)
+
+
+# Pins release c-cpp-ra4m1-v1.2.0 of Embedded-CAN-Bootloaders: sha256 over the segment data in
+# address order, so it holds whatever line endings the .hex file is checked out with.
+BOOTLOADER_SEGMENTS = [(0x0, 0x3B84), (0x01010018, 0x01010034)]
+BOOTLOADER_DATA_SHA256 = "259635d457aa202bebc5a1237137c187f72ffe3ee23aa47716a80030ff5434fb"
+
+
+def test_default_bootloader_hex_resolves_to_bundled_file() -> None:
+    path = flasher.find_default_hex()
+
+    assert path is not None
+    assert path.is_file()
+    assert path.name == "bootloader-uno_r4.hex"
+
+
+def test_bundled_bootloader_is_the_pinned_release_image() -> None:
+    path = flasher.find_default_hex()
+    assert path is not None
+    image = IntelHex(str(path))
+
+    segments = image.segments()
+    assert segments == BOOTLOADER_SEGMENTS
+    digest = hashlib.sha256()
+    for start, end in segments:
+        digest.update(image.tobinstr(start=start, end=end - 1))
+    assert digest.hexdigest() == BOOTLOADER_DATA_SHA256
+
+
+def test_bundled_bootloader_code_stays_below_the_app_base() -> None:
+    path = flasher.find_default_hex()
+    assert path is not None
+    code_end = IntelHex(str(path)).segments()[0][1]
+
+    assert code_end <= APP_BASE_ADDRESS

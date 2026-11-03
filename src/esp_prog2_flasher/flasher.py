@@ -15,7 +15,8 @@ Owns:        probe VID/PID and target-type names, the serial-port classification
              per-bootloader app range an image must lie in (check_app_range), the RA4M1
              bootloader's metadata block (RA4M1_METADATA_ADDRESS, RA4M1_METADATA_SIZE) and
              when an app flash erases it, the PSoC 6 flash and metadata address ranges,
-             bundled-asset lookup (hex/, packs/, firmware/), ESPTOOL_SHIM_FLAG (the
+             bundled-asset lookup (hex/, packs/, firmware/), BUNDLED_BOOTLOADER_TAG (the
+             release the bundled RA4M1 bootloader came from), ESPTOOL_SHIM_FLAG (the
              frozen-build esptool re-exec flag dispatched by cli.py), and the node's
              partition-table offset/entry format, the cancfg partition identity and its
              fallback offset; the SOLO release bundle (repo, default tag, asset pattern,
@@ -64,7 +65,7 @@ See also:    tests/test_psoc6.py, tests/test_dfu_config.py, tests/test_flasher.p
 
 The proven, equivalent pyOCD command-line path for the RA4M1 is:
 
-    pyocd flash -t r7fa4m1ab dfu_minima.hex
+    pyocd flash -t r7fa4m1ab bootloader-uno_r4.hex
 
 Note: the installed OpenOCD build lacks the ``renesas_ra`` flash driver, so
 flashing the RA4M1 must go through pyOCD, not OpenOCD.
@@ -119,7 +120,9 @@ DEFAULT_BAUD_RATE: Final[int] = 921600
 # instead of parsing it as a normal CLI flag. See flash_probe().
 ESPTOOL_SHIM_FLAG: Final[str] = "--esptool-shim"
 
-_HEX_NAME = "dfu_minima.hex"
+HEX_NAME = "bootloader-uno_r4.hex"
+# Embedded-CAN-Bootloaders release the bundled hex/bootloader-uno_r4.hex came from.
+BUNDLED_BOOTLOADER_TAG: Final[str] = "c-cpp-ra4m1-v1.2.0"
 _PSOC6_HEX_NAME = "psoc6_radar_full_image.hex"
 # Slim Renesas.RA_DFP CMSIS pack (pdsc + RA4M1 flash algorithms only) bundled so
 # pyOCD can resolve the r7fa4m1ab target offline — without the pack first being
@@ -136,10 +139,10 @@ _DOWNLOAD_TIMEOUT_S: Final[int] = 60
 # and fsp.ld uses it as the sketch's FLASH region origin — this is the address a
 # PlatformIO/Arduino build for this board is linked at, i.e. "where pio upload
 # writes it". Verified against the bootloader bundled in this repo
-# (hex/dfu_minima.hex): its code ends at 0x3088 (well under 0x4000) and its ID
-# Code block write lands at 0x01010018, matching ID_CODE_START in that same
-# memory_regions.ld — confirming this bootloader was built from that exact
-# linker layout.
+# (hex/bootloader-uno_r4.hex, Embedded-CAN-Bootloaders release BUNDLED_BOOTLOADER_TAG): its
+# code-flash data ends at 0x3B84 (well under 0x4000) and its ID Code block lands at
+# 0x01010018, matching ID_CODE_START in that same memory_regions.ld, so it is compatible
+# with that layout.
 APP_BASE_ADDRESS: Final[int] = 0x4000
 # Embassy bootloader reserves 32 KiB for itself, so its app slot starts here
 # (vs. the 16 KiB C bootloader's APP_BASE_ADDRESS == 0x4000).
@@ -230,8 +233,8 @@ class BundleError(FlasherError):
 
 
 def _find_bundled(*parts: str) -> Path | None:
-    """Locate a data file, checking a PyInstaller onefile bundle before falling
-    back to searching upward from the package/CWD (source and installed-package runs).
+    """Locate a bundled data file: in the PyInstaller bundle when frozen, else in the repo root
+    of the src layout. The working directory is never searched, so a stray file cannot stand in.
     """
     meipass = getattr(sys, "_MEIPASS", None)
     if getattr(sys, "frozen", False) and meipass:
@@ -239,21 +242,14 @@ def _find_bundled(*parts: str) -> Path | None:
         if candidate.is_file():
             return candidate
 
-    seen: set[Path] = set()
-    for base in (Path(__file__).resolve(), Path.cwd().resolve()):
-        for parent in [base, *base.parents]:
-            candidate = parent.joinpath(*parts)
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            if candidate.is_file():
-                return candidate
-    return None
+    repo_root = Path(__file__).resolve().parents[2]
+    candidate = repo_root.joinpath(*parts)
+    return candidate if candidate.is_file() else None
 
 
 def find_default_hex() -> Path | None:
-    """Locate the bundled ``hex/dfu_minima.hex`` regardless of how we were launched."""
-    return _find_bundled("hex", _HEX_NAME)
+    """Locate the bundled ``hex/bootloader-uno_r4.hex`` regardless of how we were launched."""
+    return _find_bundled("hex", HEX_NAME)
 
 
 def find_default_psoc6_hex() -> Path | None:
@@ -459,6 +455,7 @@ def flash(
     ``boot_reply_id`` CAN ID pair. Omit the names to leave the board on the
     bootloader's compiled-in defaults.
     """
+    from intelhex import IntelHex
     from pyocd.flash.file_programmer import FileProgrammer
 
     hex_path = Path(hex_path)
@@ -490,7 +487,16 @@ def flash(
         # first makes every attempt start from the same clean state.
         _log("Reset/halt target")
         session.target.reset_and_halt()
-        _log(f"Programming {hex_path.name} ({hex_path.stat().st_size} bytes)")
+        resolved = hex_path.resolve()
+        # Count the firmware bytes the records carry, not the size of the .hex text.
+        segments = IntelHex(str(resolved)).segments()
+        firmware_bytes = sum(end - start for start, end in segments)
+        _log(f"Programming {resolved} ({firmware_bytes} bytes in {len(segments)} segments)")
+        bundled = find_default_hex()
+        if bundled is not None and resolved == bundled.resolve():
+            _log(
+                f"This is the bundled bootloader, Embedded-CAN-Bootloaders {BUNDLED_BOOTLOADER_TAG}"
+            )
         programmer = FileProgrammer(session, progress=progress)
         programmer.program(str(hex_path))
         if config_block is not None:

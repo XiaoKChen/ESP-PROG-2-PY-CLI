@@ -30,7 +30,7 @@ keyboard-driven dashboard (or headless flags) covers four jobs:
    `firmware/esp-prog2.bin` to the probe's ESP32-S3 with **esptool**.
 
 Default target: **Renesas RA4M1 / R7FA4M1AB** (the MCU on an Arduino UNO R4 Minima).
-Default target firmware: bundled `hex/dfu_minima.hex` (the stock R4 Minima DFU bootloader).
+Default target firmware: bundled `hex/bootloader-uno_r4.hex` (the Embedded-CAN-Bootloaders CAN + DFU bootloader, release `c-cpp-ra4m1-v1.2.0`).
 Default probe firmware: bundled `firmware/esp-prog2.bin` — a **custom esp-usb-bridge
 build** (SWD/CMSIS-DAP interface + mass storage disabled). The stock launchpad image is
 JTAG-mode with an MSC drive and does **not** work with pyOCD; see
@@ -151,7 +151,10 @@ The TUI remembers its choices between launches in one JSON file per user:
 - **When:** written atomically after every edit, confirmed run or fold, and on
   quit. Headless flags never read or write it.
 - **Bad or moved files:** a saved path that no longer exists falls back to its
-  default (the bundled image, or empty) with one `!` status line. A corrupt file
+  default (the bundled image, or empty) with one `!` status line; so does a saved
+  `dfu_minima.hex`, the bootloader bundled before `bootloader-uno_r4.hex`. The
+  bundled images themselves are not saved as paths, so they always follow the
+  current build. A corrupt file
   is ignored with a `!` line and replaced on the next save. A file from a newer
   version, or in an unknown format, is ignored and never overwritten; `/ c`
   deletes it.
@@ -168,7 +171,7 @@ browser.
 
 | Target | The wizard asks |
 |---|---|
-| RA4M1 bootloader | the `.hex` (bundled `dfu_minima.hex` by default); the USB device: *Keep bootloader default* (no config block), a known device (its CAN IDs are fixed from the board table) or *Custom…* (a name and an optional CAN ID pair, both or neither); the USB manufacturer |
+| RA4M1 bootloader | the `.hex` (bundled `bootloader-uno_r4.hex` by default); the USB device: *Keep bootloader default* (no config block), a known device (its CAN IDs are fixed from the board table) or *Custom…* (a name and an optional CAN ID pair, both or neither); the USB manufacturer |
 | RA4M1 application | the `.bin`; the base address, `0x4000` (C bootloader) or `0x8000` (Embassy bootloader) |
 | PSoC 6 | the `.hex` (the bundled full image by default); see [below](#psoc-6-idu-radar) |
 | SOLO board | the board's own port, picked from the detected ports (the ESP-Prog-2 bridge is marked as not a SOLO board) or typed; the bundle source. The app, migrate flag and manufacturer come from `/ a`, `/ m` and `/ e` |
@@ -516,7 +519,7 @@ ESP-PROG-2-PY-CLI/
 │   ├── tui/           # TUI: theme, dashboard, "/" popup, wizards, file browser, saved state
 │   ├── cli.py         # argparse entry point (TUI by default)
 │   └── __main__.py    # `python -m esp_prog2_flasher`
-├── hex/             # bundled dfu_minima.hex (RA4M1 bootloader) + psoc6_radar_full_image.hex; override with --hex
+├── hex/             # bundled bootloader-uno_r4.hex (RA4M1 bootloader) + psoc6_radar_full_image.hex; override with --hex
 ├── firmware/        # bundled esp-prog2.bin (ESP-Prog-2's own firmware) + README
 ├── tools/           # pyOCD config + notes on flashing prerequisites
 ├── packs/           # slim Renesas RA_DFP pack so r7fa4m1ab resolves offline

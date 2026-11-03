@@ -152,7 +152,7 @@ class FlasherApp(App[None]):
         if missing:
             self._startup_notice = (
                 "warn",
-                f"Saved path no longer exists, using the default: {', '.join(missing)}",
+                f"Saved path replaced with the default: {', '.join(missing)}",
             )
         return loaded.state.selected, loaded.state.collapsed
 
@@ -401,7 +401,17 @@ class FlasherApp(App[None]):
         if self._state_path is None or not self._state_writable:
             return
         selected, collapsed = self._dashboard.view_state
-        snapshot = state.SavedState(self._settings, tuple(self._recents), selected, collapsed)
+        # A default is saved as "" so a later install resolves its own bundled asset.
+        settings = replace(
+            self._settings,
+            boot_hex=""
+            if self._settings.boot_hex == self._defaults.boot_hex
+            else self._settings.boot_hex,
+            psoc6_hex=""
+            if self._settings.psoc6_hex == self._defaults.psoc6_hex
+            else self._settings.psoc6_hex,
+        )
+        snapshot = state.SavedState(settings, tuple(self._recents), selected, collapsed)
         try:
             state.save_state(self._state_path, snapshot)
         except OSError as exc:
