@@ -207,7 +207,7 @@ def test_odu_details_show_the_record_the_bundle_writes(
     odu = next(t for t in SOLO_TARGETS if t.product == "SOLO ODU Controller")
     fields = dict(target_fields(odu, _solo_bundle_settings(bundle, tmp_path), None))
     assert {key: fields.get(key) for key in expected} == expected
-    assert fields["Layout"] == "node-4MB · 0x05 / 0x06"
+    assert fields["Layout"] == "node-4MB · 0x03 / 0x04"
     if expected["Record"].startswith("v1"):
         assert "I2C" not in fields and "Note" not in fields
     if expected["Record"].startswith("v?"):
@@ -497,7 +497,7 @@ def test_solo_provision_writes_the_preset_like_the_cli(monkeypatch: pytest.Monke
     ("config", "expected"),
     [
         (None, "unprovisioned"),
-        (DfuConfig("Normal Corporation", "SOLO ODU Controller", 0x5, 0x6), "host->boot=0x005"),
+        (DfuConfig("Normal Corporation", "SOLO ODU Controller", 0x3, 0x4), "host->boot=0x003"),
     ],
 )
 def test_solo_read_config_runs_without_a_confirm(

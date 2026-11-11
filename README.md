@@ -289,6 +289,7 @@ decimal, `0x000..0x7FF`). Omit both to keep the bootloader defaults
 - `IDU Controller`, `IDU Power Board`, `IDU Radar`, `IDU Articulation`, `IDU Air Sensor`
 - `SOLO ODU Controller`, `SOLO IDU Controller` (the SOLO presets; see
   [SOLO boards](#solo-boards-esp32-s3))
+- `SOLO IDU Interaction` (CAN IDs `0x07`/`0x08`; no `--flash-solo` preset yet)
 
 ## PSoC 6 (IDU Radar)
 
@@ -402,8 +403,8 @@ write v2 only over a valid v2 record already on the board, and v1 otherwise.
 
 | Board | Preset (`--product`) | Layout | Flash | TWAI TX/RX | Bitrate | CAN IDs |
 |---|---|---|---|---|---|---|
-| `odu` | `SOLO ODU Controller` | `node-4MB` | 4 MB | 4 / 5 | 250k | `0x05`/`0x06` |
-| `idu` | `SOLO IDU Controller` | `idu-16MB` | 16 MB | 6 / 7 | 250k | `0x07`/`0x08` |
+| `odu` | `SOLO ODU Controller` | `node-4MB` | 4 MB | 4 / 5 | 250k | `0x03`/`0x04` |
+| `idu` | `SOLO IDU Controller` | `idu-16MB` | 16 MB | 6 / 7 | 250k | `0x05`/`0x06` |
 
 What each preset holds and writes at boot:
 

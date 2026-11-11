@@ -65,7 +65,7 @@ def test_read_node_config_prints_the_block_and_the_board_profile(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     record = SOLO_PROFILES["SOLO ODU Controller"].record
-    node = flasher.NodeConfig(DfuConfig(DEFAULT_MANUFACTURER, "SOLO ODU Controller", 5, 6), record)
+    node = flasher.NodeConfig(DfuConfig(DEFAULT_MANUFACTURER, "SOLO ODU Controller", 3, 4), record)
     monkeypatch.setattr(flasher, "read_node_config", lambda *_a, **_k: node)
     cli._read_node_config("COM9")
     out = capsys.readouterr().out

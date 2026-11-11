@@ -48,7 +48,7 @@ _GOLDEN_RECORDS = {
     "SOLO ODU Controller": "d1a7b0df0118ffff040501ff0000000000000000209e783a",
     "SOLO IDU Controller": "d1a7b0df0118ffff060701ff0800000000000000cba2ca5d",
 }
-_GOLDEN_V2_CRCS = {"SOLO ODU Controller": "02bd587b", "SOLO IDU Controller": "e12a8269"}
+_GOLDEN_V2_CRCS = {"SOLO ODU Controller": "5c80056c", "SOLO IDU Controller": "e4cf085d"}
 # Record v2 (c-cpp-esp32-v1.3.0+): ODU holds, EXV nENBL high, EMC2305 fans 1-5 off.
 _GOLDEN_V2_RECORDS = {
     "SOLO ODU Controller": (
@@ -203,7 +203,7 @@ def test_odu_preset_keeps_todays_record_for_v1() -> None:
 
 @pytest.mark.parametrize(
     ("name", "flash_size", "boot_ids"),
-    [("SOLO ODU Controller", "4MB", (0x05, 0x06)), ("SOLO IDU Controller", "16MB", (0x07, 0x08))],
+    [("SOLO ODU Controller", "4MB", (0x03, 0x04)), ("SOLO IDU Controller", "16MB", (0x05, 0x06))],
 )
 def test_profile_derives_flash_size_and_can_ids(
     name: str, flash_size: str, boot_ids: tuple[int, int]
