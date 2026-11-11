@@ -192,8 +192,9 @@ _FROZEN_DEVICE_CAN_IDS = {
     "IDU Articulation": (0x05, 0x06),
     "IDU Controller": (0x07, 0x08),
     "IDU Power Board": (0x09, 0x0A),
-    "SOLO ODU Controller": (0x05, 0x06),
-    "SOLO IDU Controller": (0x07, 0x08),
+    "SOLO ODU Controller": (0x03, 0x04),
+    "SOLO IDU Controller": (0x05, 0x06),
+    "SOLO IDU Interaction": (0x07, 0x08),
 }
 
 

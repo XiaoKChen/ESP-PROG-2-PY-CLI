@@ -108,8 +108,9 @@ DEVICE_CAN_IDS: Final[dict[str, tuple[int, int]]] = {
     "IDU Radar": (0x01, 0x02),
     "IDU Articulation": (0x05, 0x06),
     "IDU Air Sensor": (0x03, 0x04),
-    "SOLO ODU Controller": (0x05, 0x06),
-    "SOLO IDU Controller": (0x07, 0x08),
+    "SOLO ODU Controller": (0x03, 0x04),
+    "SOLO IDU Controller": (0x05, 0x06),
+    "SOLO IDU Interaction": (0x07, 0x08),
 }
 # Derived, never stored separately: the ordered device list is just these keys.
 DEVICE_NAMES: Final[tuple[str, ...]] = tuple(DEVICE_CAN_IDS)
