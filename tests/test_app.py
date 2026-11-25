@@ -339,7 +339,10 @@ def test_typing_filters_the_targets_and_escape_clears_it() -> None:
         all_rows = target_list(app).rows
         await type_text(pilot, "idu")
         assert target_list(app).query_text == "idu"
-        assert [row.label for row in target_list(app).rows] == ["SOLO IDU Controller"]
+        assert [row.label for row in target_list(app).rows] == [
+            "SOLO IDU Controller",
+            "SOLO IDU Interaction",
+        ]
         assert "› idu" in str(app.screen.query_one("#targets").border_title)
         await pilot.press("backspace", "backspace", "backspace", "s", "o", "l", "o")
         assert {row.label for row in target_list(app).rows} == set(SOLO_PROFILES)

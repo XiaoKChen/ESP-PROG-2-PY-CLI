@@ -1,6 +1,6 @@
 """Tests for board_profile — the shared golden vectors, record rules, decoding and SOLO presets.
 
-Checks the v1 and v2 board-profile records and the full cancfg image of both SOLO presets
+Checks the v1 and v2 board-profile records and the full cancfg image of every SOLO preset
 against golden vectors shared with the firmware, every encoder rejection rule of both
 versions, round-trips and every rejection rule of parse_profile_record, and a frozen copy of
 SOLO_PROFILES.
@@ -8,7 +8,7 @@ SOLO_PROFILES.
 Covers:       encode_profile_record (v1 and v2), parse_profile_record, profile_record_version,
               describe_read_profile, build_cancfg_image (v2 block at 0x00, record at 0x50,
               0xFF to 4 KB), BoardProfile (flash size, CAN ID pair, unknown product, the
-              record per version), SOLO_PROFILES.
+              record per version), SOLO_PROFILES, LAYOUT_FLASH_SIZES.
 Not covered:  which record version a bundle takes and writing the image to a board
               (tests/test_flasher.py covers the gate and the command plan).
 See also:     src/esp_prog2_flasher/board_profile.py, src/esp_prog2_flasher/dfu_config.py
@@ -23,6 +23,7 @@ import pytest
 
 from esp_prog2_flasher.board_profile import (
     CANCFG_IMAGE_SIZE,
+    LAYOUT_FLASH_SIZES,
     PROFILE_RECORD_OFFSET,
     PROFILE_RECORD_SIZE,
     PROFILE_RECORD_V2_SIZE,
@@ -47,9 +48,15 @@ from esp_prog2_flasher.dfu_config import DEFAULT_MANUFACTURER, parse_config_bloc
 _GOLDEN_RECORDS = {
     "SOLO ODU Controller": "d1a7b0df0118ffff040501ff0000000000000000209e783a",
     "SOLO IDU Controller": "d1a7b0df0118ffff060701ff0800000000000000cba2ca5d",
+    "SOLO IDU Interaction": "d1a7b0df0118ffff040501ff02000000000000005d995d78",
 }
-_GOLDEN_V2_CRCS = {"SOLO ODU Controller": "5c80056c", "SOLO IDU Controller": "e4cf085d"}
-# Record v2 (c-cpp-esp32-v1.3.0+): ODU holds, EXV nENBL high, EMC2305 fans 1-5 off.
+_GOLDEN_V2_CRCS = {
+    "SOLO ODU Controller": "5c80056c",
+    "SOLO IDU Controller": "e4cf085d",
+    "SOLO IDU Interaction": "cbdf7233",
+}
+# Record v2 (c-cpp-esp32-v1.3.0+): ODU holds, EXV nENBL high, EMC2305 fans 1-5 off;
+# Interaction backlight IO1 low, PCAL6416A output port 0 = 0 and both ports inputs.
 _GOLDEN_V2_RECORDS = {
     "SOLO ODU Controller": (
         "d1a7b0df0238ffff040501ff460006000e800100000020000000000008092c05"
@@ -59,12 +66,17 @@ _GOLDEN_V2_RECORDS = {
         "d1a7b0df0238ffff060701ff08000000000000000000000000000000ffffff00"
         "ffffffffffffffffffffffffffffffffffffffff46c50b86"
     ),
+    "SOLO IDU Interaction": (
+        "d1a7b0df0238ffff040501ff0200000000000000000000000000000008122003"
+        "020006ff07ffffffffffffffffffffffffffffff7f8660b8"
+    ),
 }
 
 _ODU_HOLD_LOW = sum(1 << gpio for gpio in (1, 2, 6, 17, 18, 33, 34, 35, 47, 48))
 _EMC2305_FANS_OFF = I2cSafeWrites(
     8, 9, 0x2C, ((0x30, 0x00), (0x40, 0x00), (0x50, 0x00), (0x60, 0x00), (0x70, 0x00))
 )
+_PCAL6416A_RESET = I2cSafeWrites(8, 18, 0x20, ((0x02, 0x00), (0x06, 0xFF), (0x07, 0xFF)))
 _FROZEN_SOLO_PROFILES = {
     "SOLO ODU Controller": BoardProfile(
         "SOLO ODU Controller",
@@ -74,6 +86,12 @@ _FROZEN_SOLO_PROFILES = {
     ),
     "SOLO IDU Controller": BoardProfile(
         "SOLO IDU Controller", "idu-16MB", ProfileRecord(6, 7, Bitrate.KBPS_250, 1 << 3)
+    ),
+    "SOLO IDU Interaction": BoardProfile(
+        "SOLO IDU Interaction",
+        "node-16MB",
+        ProfileRecord(4, 5, Bitrate.KBPS_250, 1 << 1, 0, _PCAL6416A_RESET),
+        v1_record=ProfileRecord(4, 5, Bitrate.KBPS_250, 1 << 1),
     ),
 }
 
@@ -168,6 +186,21 @@ def test_odu_v2_record_matches_the_contract_layout() -> None:
     assert encode_profile_record(SOLO_PROFILES["SOLO ODU Controller"].record, 2) == expected
 
 
+def test_interaction_v2_record_matches_the_contract_layout() -> None:
+    expected = _raw_v2(
+        tx=4,
+        rx=5,
+        hold_low=1 << 1,
+        hold_high=0,
+        sda=8,
+        scl=18,
+        addr=0x20,
+        count=3,
+        pairs=bytes.fromhex("020006ff07ff") + b"\xff" * 10,
+    )
+    assert encode_profile_record(SOLO_PROFILES["SOLO IDU Interaction"].record, 2) == expected
+
+
 @pytest.mark.parametrize("version", [1, 2])
 @pytest.mark.parametrize("name", list(_GOLDEN_RECORDS))
 def test_cancfg_image_matches_golden_vectors(name: str, version: ProfileVersion) -> None:
@@ -203,13 +236,21 @@ def test_odu_preset_keeps_todays_record_for_v1() -> None:
 
 @pytest.mark.parametrize(
     ("name", "flash_size", "boot_ids"),
-    [("SOLO ODU Controller", "4MB", (0x03, 0x04)), ("SOLO IDU Controller", "16MB", (0x05, 0x06))],
+    [
+        ("SOLO ODU Controller", "4MB", (0x03, 0x04)),
+        ("SOLO IDU Controller", "16MB", (0x05, 0x06)),
+        ("SOLO IDU Interaction", "16MB", (0x07, 0x08)),
+    ],
 )
 def test_profile_derives_flash_size_and_can_ids(
     name: str, flash_size: str, boot_ids: tuple[int, int]
 ) -> None:
     assert SOLO_PROFILES[name].flash_size == flash_size
     assert SOLO_PROFILES[name].boot_ids == boot_ids
+
+
+def test_layouts_match_the_bundle_flash_sizes() -> None:
+    assert LAYOUT_FLASH_SIZES == {"node-4MB": "4MB", "node-16MB": "16MB", "idu-16MB": "16MB"}
 
 
 def test_profile_rejects_unknown_product() -> None:
@@ -456,6 +497,13 @@ def test_read_profile_text_names_v2_holds_and_i2c_writes() -> None:
         "TWAI tx GPIO4 rx GPIO5, 250 kbit/s, hold-LOW mask 0x1800E00060046, "
         "hold-HIGH mask 0x200000, I2C SDA GPIO8 SCL GPIO9 @ 0x2C: "
         "0x30=0x00 0x40=0x00 0x50=0x00 0x60=0x00 0x70=0x00"
+    )
+
+
+def test_read_profile_text_names_the_interaction_expander_writes() -> None:
+    assert describe_read_profile(SOLO_PROFILES["SOLO IDU Interaction"].record) == (
+        "TWAI tx GPIO4 rx GPIO5, 250 kbit/s, hold-LOW mask 0x2, "
+        "I2C SDA GPIO8 SCL GPIO18 @ 0x20: 0x02=0x00 0x06=0xFF 0x07=0xFF"
     )
 
 

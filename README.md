@@ -20,10 +20,11 @@ keyboard-driven dashboard (or headless flags) covers four jobs:
 2. **Flash the PSoC 6 on the IDU Radar board** — writes the bundled full image
    (bootloader + App1, `hex/psoc6_radar_full_image.hex`) to the PSoC 62S3's main
    flash over SWD with pyOCD. See [PSoC 6 (IDU Radar)](#psoc-6-idu-radar).
-3. **Set up a SOLO ODU/IDU board (ESP32-S3)** over the board's **own** USB port —
-   writes the Embedded-CAN-Bootloaders bundle plus the board's `cancfg`
-   (device config block and board profile) with **esptool**. The same port
-   can provision or read just the `cancfg` of an ESP32-S3 CAN node. See
+3. **Set up a SOLO ODU, IDU or IDU Interaction board (ESP32-S3)** over the
+   board's **own** USB port — writes the Embedded-CAN-Bootloaders bundle plus
+   the board's `cancfg` (device config block and board profile) with
+   **esptool**. The same port can provision or read just the `cancfg` of an
+   ESP32-S3 CAN node. See
    [SOLO boards](#solo-boards-esp32-s3) and
    [ESP32-S3 CAN node config](#esp32-s3-can-node-config-cli-only).
 4. **Reflash the ESP-Prog-2's own firmware** — writes the bundled
@@ -287,9 +288,8 @@ decimal, `0x000..0x7FF`). Omit both to keep the bootloader defaults
 
 - `ODU Controller`, `ODU Superheat`, `ODU Air Sensor`, `ODU Power Board`
 - `IDU Controller`, `IDU Power Board`, `IDU Radar`, `IDU Articulation`, `IDU Air Sensor`
-- `SOLO ODU Controller`, `SOLO IDU Controller` (the SOLO presets; see
-  [SOLO boards](#solo-boards-esp32-s3))
-- `SOLO IDU Interaction` (CAN IDs `0x07`/`0x08`; no `--flash-solo` preset yet)
+- `SOLO ODU Controller`, `SOLO IDU Controller`, `SOLO IDU Interaction` (the
+  SOLO presets; see [SOLO boards](#solo-boards-esp32-s3))
 
 ## PSoC 6 (IDU Radar)
 
@@ -405,6 +405,14 @@ write v2 only over a valid v2 record already on the board, and v1 otherwise.
 |---|---|---|---|---|---|---|
 | `odu` | `SOLO ODU Controller` | `node-4MB` | 4 MB | 4 / 5 | 250k | `0x03`/`0x04` |
 | `idu` | `SOLO IDU Controller` | `idu-16MB` | 16 MB | 6 / 7 | 250k | `0x05`/`0x06` |
+| `interaction` | `SOLO IDU Interaction` | `node-16MB` | 16 MB | 4 / 5 | 250k | `0x07`/`0x08` |
+
+`node-16MB` first ships in **c-cpp-esp32-v1.4.0** (the default bundle), which
+keeps `node-4MB` and `idu-16MB`. Its first 4 MB match `node-4MB` (NVS
+`0x9000`, otadata `0xE000`, `cancfg` `0x11000`, updater at `0x20000`, 1.75 MB
+`ota_0`/`ota_1` at `0x80000`/`0x240000`); an `assets` data partition fills
+`0x400000` to the end of flash. An older bundle has no `node-16MB`, so
+`--flash-solo interaction` refuses it before writing anything.
 
 What each preset holds and writes at boot:
 
@@ -412,13 +420,15 @@ What each preset holds and writes at boot:
 |---|---|---|
 | `odu` | LOW: GPIO 1, 2 (reversing valve), 17, 18 (relays), 6 (fan 6 PWM), 33, 34, 35, 47, 48 (EXV SM0, DIR, STEP, SM1, RESET). HIGH: GPIO 21 (EXV nENBL, active low). I2C SDA 8 / SCL 9, EMC2305 at `0x2C`: Fan 1–5 Setting (`0x30`, `0x40`, `0x50`, `0x60`, `0x70`) = `0x00`, which also turns off the chip's 4 s power-up watchdog that would run every fan at full speed | no holds, no I2C writes (unchanged from earlier releases) |
 | `idu` | LOW: GPIO 3. No HIGH holds, no I2C writes | the same |
+| `interaction` | LOW: GPIO 1 (backlight off). I2C SDA 8 / SCL 18, PCAL6416A at `0x20`: Output Port 0 (`0x02`) = `0x00`, Configuration Port 0 and 1 (`0x06`, `0x07`) = `0xFF` (all inputs), so the panel and touch reset lines (P0_0, P0_5, pulled down) stay asserted while the updater runs | LOW: GPIO 1, no I2C writes (never written: no bundle older than 1.3.0 has `node-16MB`) |
 
 The ODU's levels are the ones its app sets first thing in `setup()`
 (Airform-SOLO-ODU-Controller `src/main.cpp`); the record makes the bootloader
-apply them before the app runs.
+apply them before the app runs. The Interaction board's expander keeps its
+state across an ESP32 reset, so the writes release whatever the app drove.
 
 ```sh
-# Fetch the bundle from the default release (c-cpp-esp32-v1.3.0) with gh, then flash.
+# Fetch the bundle from the default release (c-cpp-esp32-v1.4.0) with gh, then flash.
 uv run esp-prog2-flasher --flash-solo odu --port COM7
 # Use an unzipped bundle on disk, or another release.
 uv run esp-prog2-flasher --flash-solo idu --port COM8 --bundle path/to/esp32s3-can-updater-v1.3.0
@@ -429,18 +439,31 @@ uv run esp-prog2-flasher --flash-solo odu --port COM7 --bundle bundle/ --app fir
 uv run esp-prog2-flasher --flash-solo --port COM7 --bundle bundle/
 ```
 
+The Interaction board ships on the stock Arduino-ESP32 layout and bootloader
+(`default_16MB.csv`), so its first install migrates it to the shared updater:
+
+```sh
+uv run esp-prog2-flasher --flash-solo interaction --port COM9 --migrate-stock --app firmware.bin
+```
+
+Its NVS (`0x9000`, 20 KB) sits where the stock layout has it, so saved settings
+survive. The stock app's leftovers in `0x10000..0x1FFFF` (where `phy_init`,
+`cancfg` and `bootcnt` now live) are erased; the rest of the old app is
+overwritten or left in the unused `ota_1` and `assets` space.
+
 Flash sequence, each step one esptool run:
 
 1. With `--migrate-stock`: erase `0x10000..0x1FFFF`.
 2. One `write-flash --flash-mode dio --flash-freq 80m --flash-size <layout>`:
    bootloader at `0x0`, the layout's partition table at `0x8000`, blank
    otadata at `0xE000`, the CAN updater at the layout's `factory` offset
-   (`0x20000` on node-4MB, `0xFA0000` on idu-16MB), and `cancfg` at `0x11000`
-   (board-profile record v2 or v1, picked from the bundle's version as above).
+   (`0x20000` on node-4MB and node-16MB, `0xFA0000` on idu-16MB), and `cancfg`
+   at `0x11000` (board-profile record v2 or v1, picked from the bundle's version
+   as above).
 3. Read `cancfg` back and fail if any byte differs.
-4. With `--app`: write it at the layout's `ota_0` (`0x80000` on node-4MB,
-   `0x20000` on idu-16MB) plus an otadata image selecting `ota_0`. Without
-   `--app` the board boots the CAN updater.
+4. With `--app`: write it at the layout's `ota_0` (`0x80000` on node-4MB and
+   node-16MB, `0x20000` on idu-16MB) plus an otadata image selecting `ota_0`.
+   Without `--app` the board boots the CAN updater.
 
 Every step runs with `--after no-reset`. A final `chip-id` call with
 `--before no-reset --after watchdog-reset` then reboots the board, because the

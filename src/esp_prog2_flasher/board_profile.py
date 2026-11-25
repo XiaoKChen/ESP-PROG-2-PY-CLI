@@ -5,7 +5,8 @@ early hold-LOW/hold-HIGH GPIOs and I2C safe writes come from a board-profile rec
 right after the v2 DFU config block in the cancfg partition. This module encodes and
 validates that record (v1, 24 bytes, or v2, 56 bytes), pads v2 block + record into the 4 KB
 cancfg image flasher.py writes, decodes a record read back exactly as the firmware would (and
-words it for the CLI and TUI), and owns the SOLO ODU/IDU presets that cli.py offers.
+words it for the CLI and TUI), and owns the SOLO presets (ODU, IDU, IDU Interaction)
+that cli.py offers.
 
 Owns:        the record layouts, magic, versions, refused GPIOs, bitrate codes and I2C limits;
              the firmware's fallback record (DEFAULT_PROFILE_RECORD, mirrored here, owned by
@@ -118,9 +119,14 @@ BITRATE_LABELS: Final[dict[Bitrate, str]] = {
 
 
 # Flash layouts the release bundle carries; each name maps to the chip's flash size.
-LayoutName = Literal["node-4MB", "idu-16MB"]
+# node-16MB (c-cpp-esp32-v1.4.0+) is node-4MB's first 4 MB plus an assets partition.
+LayoutName = Literal["node-4MB", "node-16MB", "idu-16MB"]
 FlashSize = Literal["4MB", "16MB"]
-LAYOUT_FLASH_SIZES: Final[dict[LayoutName, FlashSize]] = {"node-4MB": "4MB", "idu-16MB": "16MB"}
+LAYOUT_FLASH_SIZES: Final[dict[LayoutName, FlashSize]] = {
+    "node-4MB": "4MB",
+    "node-16MB": "16MB",
+    "idu-16MB": "16MB",
+}
 
 
 class BoardProfileError(Exception):
@@ -234,6 +240,13 @@ _ODU_HOLD_HIGH: Final[int] = 1 << 21  # EXV nENBL, active low: HIGH disables the
 _ODU_EMC2305_FANS_OFF: Final[I2cSafeWrites] = I2cSafeWrites(
     8, 9, 0x2C, ((0x30, 0x00), (0x40, 0x00), (0x50, 0x00), (0x60, 0x00), (0x70, 0x00))
 )
+_INTERACTION_BACKLIGHT_OFF: Final[int] = 1 << 1  # LEDC backlight PWM on IO1: LOW is dark.
+# PCAL6416A at 0x20 on SDA 8/SCL 18: output port 0 = 0, then both configuration registers =
+# inputs. The expander survives an ESP32 reset, so this releases what the app drove and the
+# panel and touch reset lines (P0_0, P0_5, 10k pull-downs) stay asserted in the updater.
+_INTERACTION_EXPANDER_RESET: Final[I2cSafeWrites] = I2cSafeWrites(
+    8, 18, 0x20, ((0x02, 0x00), (0x06, 0xFF), (0x07, 0xFF))
+)
 
 SOLO_PROFILES: Final[dict[str, BoardProfile]] = {
     profile.product: profile
@@ -250,6 +263,21 @@ SOLO_PROFILES: Final[dict[str, BoardProfile]] = {
         ),
         BoardProfile(
             "SOLO IDU Controller", "idu-16MB", ProfileRecord(6, 7, Bitrate.KBPS_250, 1 << 3)
+        ),
+        BoardProfile(
+            "SOLO IDU Interaction",
+            "node-16MB",
+            ProfileRecord(
+                4,
+                5,
+                Bitrate.KBPS_250,
+                _INTERACTION_BACKLIGHT_OFF,
+                0,
+                _INTERACTION_EXPANDER_RESET,
+            ),
+            # node-16MB first ships in c-cpp-esp32-v1.4.0, which reads v2; this only keeps
+            # the preset whole for the v1 path.
+            v1_record=ProfileRecord(4, 5, Bitrate.KBPS_250, _INTERACTION_BACKLIGHT_OFF),
         ),
     )
 }

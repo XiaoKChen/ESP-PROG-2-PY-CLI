@@ -31,7 +31,8 @@ MAX_RECENT_FILES: Final[int] = 5  # per picker kind, atop the file browser
 _SECONDS_PER_MINUTE: Final[int] = 60
 _SECONDS_PER_HOUR: Final[int] = 3600
 _SECONDS_PER_DAY: Final[int] = 86400
-# SOLO preset products end in this; the Recent rows drop it to stay short.
+# The Controller presets end in this; the Recent rows drop it to stay short ("SOLO ODU",
+# "SOLO IDU"). "SOLO IDU Interaction" has no suffix and shows in full.
 _PRODUCT_SUFFIX: Final[str] = " Controller"
 
 

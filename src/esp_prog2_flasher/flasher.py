@@ -1382,9 +1382,9 @@ def read_node_config(
 
 SOLO_BUNDLE_REPO: Final[str] = "XiaoKChen/Embedded-CAN-Bootloaders"
 SOLO_BUNDLE_TAG_PREFIX: Final[str] = "c-cpp-esp32-"  # release tags: c-cpp-esp32-vX.Y.Z
-# The ODU's early safe holds and fan-off writes (board-profile record v2) need
-# c-cpp-esp32-v1.3.0; move this default to it once that release is published.
-DEFAULT_SOLO_BUNDLE_TAG: Final[str] = "c-cpp-esp32-v1.3.0"
+# c-cpp-esp32-v1.4.0 adds the node-16MB layout (the IDU Interaction board) and keeps
+# node-4MB and idu-16MB, so every SOLO preset flashes from it.
+DEFAULT_SOLO_BUNDLE_TAG: Final[str] = "c-cpp-esp32-v1.4.0"
 # FROZEN CONTRACT — the first Embedded-CAN-Bootloaders bundle whose bootloader and updater
 # read board-profile record v2. Older ones reject v2 and fall back to TX 4/RX 5 with no holds.
 PROFILE_V2_MIN_BUNDLE_VERSION: Final[tuple[int, int, int]] = (1, 3, 0)
