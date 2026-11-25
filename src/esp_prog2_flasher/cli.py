@@ -53,7 +53,11 @@ from .flasher import TargetState
 logger = logging.getLogger(__name__)
 
 # --flash-solo board keys, each naming a SOLO_PROFILES preset.
-SOLO_BOARDS: Final[dict[str, str]] = {"odu": "SOLO ODU Controller", "idu": "SOLO IDU Controller"}
+SOLO_BOARDS: Final[dict[str, str]] = {
+    "odu": "SOLO ODU Controller",
+    "idu": "SOLO IDU Controller",
+    "interaction": "SOLO IDU Interaction",
+}
 # What --flash-solo holds when given without a board: prompt for one. Not a str, so
 # argparse neither type-converts nor choice-checks it.
 _ASK_FOR_BOARD: Final = object()
@@ -184,9 +188,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Flash a SOLO board (ESP32-S3) over its own USB port: the Embedded-CAN-Bootloaders "
         "bundle (bootloader, partition table, otadata, CAN updater) plus the board's cancfg "
         "(DFU config + board profile), verified by read-back, then a separate watchdog-reset "
-        "call. odu = "
-        f"{SOLO_BOARDS['odu']!r}, idu = {SOLO_BOARDS['idu']!r}; omit the board to pick it "
-        "interactively. Requires --port.",
+        "call. "
+        + ", ".join(f"{board} = {product!r}" for board, product in SOLO_BOARDS.items())
+        + "; omit the board to pick it interactively. Requires --port.",
     )
     p.add_argument(
         "--bundle",
@@ -215,7 +219,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--migrate-stock",
         action="store_true",
         help="With --flash-solo: first erase 0x10000..0x1FFFF, left over from a stock "
-        "Arduino-ESP32 layout.",
+        "Arduino-ESP32 layout. The interaction preset (node-16MB) always does this.",
     )
     p.add_argument(
         "--port",
@@ -319,7 +323,7 @@ def _prompt_solo_board() -> str:
     """Ask which SOLO preset to flash; exits 2 when stdin is not a terminal."""
     if not sys.stdin.isatty():
         print(
-            f"--flash-solo needs a board ({' or '.join(SOLO_BOARDS)}) when not run interactively.",
+            f"--flash-solo needs a board ({', '.join(SOLO_BOARDS)}) when not run interactively.",
             file=sys.stderr,
         )
         sys.exit(2)

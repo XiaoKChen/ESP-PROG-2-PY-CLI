@@ -6,7 +6,10 @@ command plan, the bytes written and the read-back verification are checked witho
 checks load_solo_bundle against a synthetic bundle and every manifest rule; pins the ota_0 otadata
 image to the CRC verified on the SOLO bench; and drives fetch_solo_bundle with a fake gh.
 
-Covers:       flash_solo (both presets, migrate-stock erase, app + otadata, --after modes,
+Covers:       flash_solo (every preset, the Interaction on a node-16MB bundle and refused by
+              one without it, migrate-stock erase (always on for node-16MB, off by default
+              for the ODU), an app larger than the layout's ota_0 slot refused before
+              esptool and one filling it written, app + otadata, --after modes,
               read-back mismatch, esptool failure, validation before any esptool call, the
               record version a bundle gets), bundle_profile_version, provision_node with and
               without a profile (v1, or v2 over a v2 record), read_node_config, the no-reset
@@ -43,6 +46,7 @@ import zlib
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from intelhex import IntelHex
@@ -140,11 +144,20 @@ _BUNDLE_FILES = {
     "ota_data_initial.bin": b"\xff" * 0x2000,
     "partition-table-node-4MB.bin": b"\xaa\x50node",
     "partition-table-idu-16MB.bin": b"\xaa\x50idu",
+    "partition-table-node-16MB.bin": b"\xaa\x50node16",
 }
 
 
 def _versioned(version: str) -> dict[str, object]:
     return {**_MANIFEST, "version": version}
+
+
+def _with_node_16mb(version: str = "1.4.0") -> dict[str, object]:
+    """A c-cpp-esp32-v1.4.0-style manifest: node-4MB and idu-16MB plus node-16MB."""
+    layouts = cast(dict[str, object], _MANIFEST["layouts"])
+    node_4mb = cast(dict[str, str], layouts["node-4MB"])
+    node_16mb = {**node_4mb, "table": "partition-table-node-16MB.bin", "flash_size": "16MB"}
+    return {**_MANIFEST, "version": version, "layouts": {**layouts, "node-16MB": node_16mb}}
 
 
 def _make_bundle(root: Path, manifest: dict[str, object] | None = None) -> Path:
@@ -407,6 +420,66 @@ def test_odu_app_goes_to_its_own_ota_0(tmp_path: Path) -> None:
     ]
 
 
+def test_interaction_plan_always_migrates_from_stock_with_app(tmp_path: Path) -> None:
+    fake = FakeEsptool()
+    app = _app(tmp_path)
+    logs: list[str] = []
+    # No migrate_stock: node-16MB boards ship on the stock layout, so the erase is always on.
+    flash_solo(
+        SOLO_PROFILES["SOLO IDU Interaction"],
+        _PORT,
+        _make_bundle(tmp_path / "bundle", _with_node_16mb()),
+        app=app,
+        enter_download_mode=_port_as_is,
+        runner=fake,
+        log=logs.append,
+    )
+    assert fake.calls == [
+        [*_conn("no-reset"), "erase-region", "0x10000", "0x10000"],
+        _write_bundle("16MB", "partition-table-node-16MB.bin", "0x20000"),
+        [*_conn("no-reset"), "read-flash", "0x11000", "4096", "read.bin"],
+        [*_conn("no-reset"), "write-flash", "0x80000", "app.bin", "0xE000", "otadata_ota0.bin"],
+        _RESET_COMMAND,
+    ]
+    assert fake.flash[0x11000] == _golden_cancfg("SOLO IDU Interaction", 2)
+    assert fake.flash[0x8000] == _BUNDLE_FILES["partition-table-node-16MB.bin"]
+    assert fake.flash[0x80000] == app.read_bytes()
+    assert "Board-profile record v2" in logs
+    assert not any("WARNING" in line for line in logs)
+
+
+@pytest.mark.parametrize(
+    ("product", "table"),
+    [
+        ("SOLO ODU Controller", "partition-table-node-4MB.bin"),
+        ("SOLO IDU Controller", "partition-table-idu-16MB.bin"),
+        ("SOLO IDU Interaction", "partition-table-node-16MB.bin"),
+    ],
+)
+def test_every_preset_flashes_from_a_node_16mb_bundle(
+    tmp_path: Path, product: str, table: str
+) -> None:
+    fake = FakeEsptool()
+    bundle = _make_bundle(tmp_path / "b", _with_node_16mb())
+    flash_solo(SOLO_PROFILES[product], _PORT, bundle, enter_download_mode=_port_as_is, runner=fake)
+    assert fake.flash[0x8000] == _BUNDLE_FILES[table]
+    assert fake.flash[0x11000] == _golden_cancfg(product, 2)
+
+
+def test_bundle_without_node_16mb_refuses_the_interaction_before_esptool(tmp_path: Path) -> None:
+    fake = FakeEsptool()
+    bundle = _make_bundle(tmp_path / "b", _versioned("1.3.0"))
+    with pytest.raises(BundleError, match="has no 'node-16MB' layout"):
+        flash_solo(
+            SOLO_PROFILES["SOLO IDU Interaction"],
+            _PORT,
+            bundle,
+            enter_download_mode=_port_as_is,
+            runner=fake,
+        )
+    assert fake.calls == []
+
+
 def test_custom_manufacturer_lands_in_cancfg(tmp_path: Path) -> None:
     fake = FakeEsptool()
     flash_solo(
@@ -571,6 +644,54 @@ def test_valid_bundle_loads(tmp_path: Path) -> None:
         0x20000,
         0xE000,
     )
+
+
+def test_odu_without_migrate_stock_erases_nothing(tmp_path: Path) -> None:
+    fake = FakeEsptool()
+    flash_solo(
+        _ODU, _PORT, _make_bundle(tmp_path / "b"), enter_download_mode=_port_as_is, runner=fake
+    )
+    assert not any("erase-region" in call for call in fake.calls)
+
+
+@pytest.mark.parametrize(
+    ("product", "slot_size"),
+    [
+        ("SOLO ODU Controller", 0x1C0000),
+        ("SOLO IDU Interaction", 0x1C0000),
+        ("SOLO IDU Controller", 0x300000),
+    ],
+)
+def test_app_larger_than_ota_0_fails_before_esptool(
+    tmp_path: Path, product: str, slot_size: int
+) -> None:
+    fake = FakeEsptool()
+    app = _app(tmp_path, b"\xe9" + b"\x00" * slot_size)
+    with pytest.raises(FlasherError, match=f"ota_0 slot holds 0x{slot_size:X}"):
+        flash_solo(
+            SOLO_PROFILES[product],
+            _PORT,
+            _make_bundle(tmp_path / "b", _with_node_16mb()),
+            app=app,
+            enter_download_mode=_port_as_is,
+            runner=fake,
+        )
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("product", ["SOLO ODU Controller", "SOLO IDU Interaction"])
+def test_app_filling_the_node_ota_0_slot_is_written(tmp_path: Path, product: str) -> None:
+    fake = FakeEsptool()
+    app = _app(tmp_path, b"\xe9" + b"\x00" * (0x1C0000 - 1))
+    flash_solo(
+        SOLO_PROFILES[product],
+        _PORT,
+        _make_bundle(tmp_path / "b", _with_node_16mb()),
+        app=app,
+        enter_download_mode=_port_as_is,
+        runner=fake,
+    )
+    assert fake.flash[0x80000] == app.read_bytes()
 
 
 def test_non_esp_app_fails_before_esptool(tmp_path: Path) -> None:

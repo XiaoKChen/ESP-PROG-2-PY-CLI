@@ -5,7 +5,9 @@ Covers:       --version printing the package version and exiting 0; --provision-
               for any other product; --flash-app resolving --app-address to 0x4000, or to 0x8000
               with --embassy, and passing --embassy through to flash_app; a refused app range
               exiting 2 with one line on stderr and no traceback; --embassy or --app-address without
-              --flash-app exiting 2 before any flash or detect.
+              --flash-app exiting 2 before any flash or detect; every --flash-solo board key
+              (odu, idu, interaction) flashing its SOLO preset with --bundle, --app and
+              --migrate-stock passed through, and an unknown board exiting 2.
 Not covered:  argument parsing as a whole; esptool runs (tests/test_flasher.py).
 See also:     src/esp_prog2_flasher/cli.py, src/esp_prog2_flasher/board_profile.py
 """
@@ -156,3 +158,41 @@ def test_flash_app_refusal_exits_2_with_one_line_and_no_traceback(
     err = capsys.readouterr().err
     assert err.startswith("Application flash refused: Refusing app address 0x0")
     assert "Traceback" not in err
+
+
+def test_every_solo_board_names_a_preset() -> None:
+    assert set(cli.SOLO_BOARDS.values()) == set(SOLO_PROFILES)
+
+
+@pytest.mark.parametrize(
+    ("board", "product"),
+    [
+        ("odu", "SOLO ODU Controller"),
+        ("idu", "SOLO IDU Controller"),
+        ("interaction", "SOLO IDU Interaction"),
+    ],
+)
+def test_flash_solo_board_choice_flashes_its_preset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, board: str, product: str
+) -> None:
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    monkeypatch.setattr(flasher, "flash_solo", lambda *a, **kw: calls.append((a, kw)))
+    app = tmp_path / "firmware.bin"
+    argv = ["--flash-solo", board, "--port", "COM9", "--bundle", str(tmp_path)]
+    argv += ["--migrate-stock", "--app", str(app)]
+    monkeypatch.setattr(sys, "argv", ["esp-prog2-flasher", *argv])
+    cli.main()
+    assert len(calls) == 1
+    (profile, port, bundle_dir), kwargs = calls[0]
+    assert profile == SOLO_PROFILES[product]
+    assert (port, bundle_dir) == ("COM9", tmp_path)
+    assert (kwargs["app"], kwargs["migrate_stock"]) == (app, True)
+
+
+def test_flash_solo_rejects_an_unknown_board(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli._build_parser().parse_args(["--flash-solo", "display"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "invalid choice" in err
+    assert all(board in err for board in cli.SOLO_BOARDS)

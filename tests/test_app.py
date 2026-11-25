@@ -7,7 +7,8 @@ test runs its pilot coroutine with asyncio.run, so no pytest async plugin is nee
 Covers:       mounting at 80x24 and 120x40 with every panel and every target's details on
               screen, the details pane hidden below 80 columns; type-to-filter and esc; letters
               never acting on the dashboard; the "/" popup listing only valid commands, running
-              one, and "no shortcut"; the SOLO flash wizard (n/esc cancel, y flashes like
+              one, and "no shortcut"; the Interaction's details showing "migrate on"; the
+              SOLO flash wizard (n/esc cancel, y flashes like
               cli.py's --flash-solo), provision and read config like --provision-node and
               --read-node-config; the RA4M1 bootloader wizard with a known and a custom device;
               the RA4M1 app flash confirm's Metadata row (erase, covered, keep) on one line of
@@ -228,6 +229,12 @@ def test_idu_details_show_its_one_hold_and_no_i2c() -> None:
     assert "I2C" not in fields and "Note" not in fields
 
 
+def test_interaction_details_show_the_stock_migration_on_without_the_toggle() -> None:
+    interaction = next(t for t in SOLO_TARGETS if t.product == "SOLO IDU Interaction")
+    fields = dict(target_fields(interaction, Settings(), None))
+    assert fields["Options"] == "app none · migrate on"
+
+
 _METADATA_START = f"0x{flasher.RA4M1_METADATA_ADDRESS:X}"
 
 
@@ -339,7 +346,10 @@ def test_typing_filters_the_targets_and_escape_clears_it() -> None:
         all_rows = target_list(app).rows
         await type_text(pilot, "idu")
         assert target_list(app).query_text == "idu"
-        assert [row.label for row in target_list(app).rows] == ["SOLO IDU Controller"]
+        assert [row.label for row in target_list(app).rows] == [
+            "SOLO IDU Controller",
+            "SOLO IDU Interaction",
+        ]
         assert "› idu" in str(app.screen.query_one("#targets").border_title)
         await pilot.press("backspace", "backspace", "backspace", "s", "o", "l", "o")
         assert {row.label for row in target_list(app).rows} == set(SOLO_PROFILES)
