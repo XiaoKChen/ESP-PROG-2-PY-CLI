@@ -219,7 +219,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--migrate-stock",
         action="store_true",
         help="With --flash-solo: first erase 0x10000..0x1FFFF, left over from a stock "
-        "Arduino-ESP32 layout.",
+        "Arduino-ESP32 layout. The interaction preset (node-16MB) always does this.",
     )
     p.add_argument(
         "--port",

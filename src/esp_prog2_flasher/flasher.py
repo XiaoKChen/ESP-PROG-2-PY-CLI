@@ -1623,7 +1623,7 @@ def otadata_selecting_ota0() -> bytes:
     return entry.ljust(OTADATA_SIZE, b"\xff")
 
 
-def _checked_app_image(app: Path) -> Path:
+def _checked_app_image(app: Path, slot_size: int) -> Path:
     app = Path(app)
     if not app.is_file():
         raise FileNotFoundError(f"Application file not found: {app}")
@@ -1631,6 +1631,11 @@ def _checked_app_image(app: Path) -> Path:
         magic = image.read(len(_ESP_IMAGE_MAGIC))
     if magic != _ESP_IMAGE_MAGIC:
         raise FlasherError(f"{app} is not an ESP app image (first byte must be 0xE9)")
+    size = app.stat().st_size
+    if size > slot_size:
+        raise FlasherError(
+            f"{app} is {size} bytes (0x{size:X}); the ota_0 slot holds 0x{slot_size:X}"
+        )
     return app
 
 
@@ -1658,7 +1663,8 @@ def flash_solo(
 
     Steps, over the board's own USB port:
 
-    1. With ``migrate_stock``, erase 0x10000..0x1FFFF (a stock Arduino app's leftovers).
+    1. With ``migrate_stock``, or always for a layout in STOCK_MIGRATION_LAYOUTS
+       (node-16MB), erase 0x10000..0x1FFFF (a stock Arduino app's leftovers).
     2. One ``write-flash --flash-mode dio --flash-freq 80m --flash-size <layout>`` of the
        bootloader, the layout's partition table, the blank otadata, the CAN updater at
        the layout's ``factory`` offset and the board's cancfg image (v2 block + profile
@@ -1676,7 +1682,8 @@ def flash_solo(
 
     Raises:
         BundleError: the bundle is invalid or lacks the profile's layout.
-        FileNotFoundError, FlasherError: ``app`` is missing or not an ESP image.
+        FileNotFoundError, FlasherError: ``app`` is missing, not an ESP image, or larger
+            than the layout's ota_0 slot.
         InvalidNameError: ``manufacturer`` violates the block contract.
         FlashFailedError: the board did not reach download mode, esptool failed, or the
             cancfg read-back differs.
@@ -1695,7 +1702,7 @@ def flash_solo(
             f"Bundle layout {profile.layout!r} is {layout.flash_size}; "
             f"{profile.product} needs {profile.flash_size}"
         )
-    app_path = _checked_app_image(app) if app is not None else None
+    app_path = _checked_app_image(app, profile.app_slot_size) if app is not None else None
     record_version = bundle_profile_version(bundle.version)
     record = profile.record_for(record_version)
     cancfg = build_cancfg_image(profile.config_block(manufacturer), record, record_version)
@@ -1717,7 +1724,7 @@ def flash_solo(
     with tempfile.TemporaryDirectory() as tmp:
         cancfg_path = Path(tmp) / "cancfg.bin"
         cancfg_path.write_bytes(cancfg)
-        if migrate_stock:
+        if migrate_stock or profile.always_migrates_stock:
             _log("Erasing the stock layout's leftovers")
             _run_node_esptool(
                 port,

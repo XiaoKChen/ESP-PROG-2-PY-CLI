@@ -7,7 +7,9 @@ checks load_solo_bundle against a synthetic bundle and every manifest rule; pins
 image to the CRC verified on the SOLO bench; and drives fetch_solo_bundle with a fake gh.
 
 Covers:       flash_solo (every preset, the Interaction on a node-16MB bundle and refused by
-              one without it, migrate-stock erase, app + otadata, --after modes,
+              one without it, migrate-stock erase (always on for node-16MB, off by default
+              for the ODU), an app larger than the layout's ota_0 slot refused before
+              esptool and one filling it written, app + otadata, --after modes,
               read-back mismatch, esptool failure, validation before any esptool call, the
               record version a bundle gets), bundle_profile_version, provision_node with and
               without a profile (v1, or v2 over a v2 record), read_node_config, the no-reset
@@ -418,16 +420,16 @@ def test_odu_app_goes_to_its_own_ota_0(tmp_path: Path) -> None:
     ]
 
 
-def test_interaction_plan_migrates_from_stock_with_app(tmp_path: Path) -> None:
+def test_interaction_plan_always_migrates_from_stock_with_app(tmp_path: Path) -> None:
     fake = FakeEsptool()
     app = _app(tmp_path)
     logs: list[str] = []
+    # No migrate_stock: node-16MB boards ship on the stock layout, so the erase is always on.
     flash_solo(
         SOLO_PROFILES["SOLO IDU Interaction"],
         _PORT,
         _make_bundle(tmp_path / "bundle", _with_node_16mb()),
         app=app,
-        migrate_stock=True,
         enter_download_mode=_port_as_is,
         runner=fake,
         log=logs.append,
@@ -642,6 +644,54 @@ def test_valid_bundle_loads(tmp_path: Path) -> None:
         0x20000,
         0xE000,
     )
+
+
+def test_odu_without_migrate_stock_erases_nothing(tmp_path: Path) -> None:
+    fake = FakeEsptool()
+    flash_solo(
+        _ODU, _PORT, _make_bundle(tmp_path / "b"), enter_download_mode=_port_as_is, runner=fake
+    )
+    assert not any("erase-region" in call for call in fake.calls)
+
+
+@pytest.mark.parametrize(
+    ("product", "slot_size"),
+    [
+        ("SOLO ODU Controller", 0x1C0000),
+        ("SOLO IDU Interaction", 0x1C0000),
+        ("SOLO IDU Controller", 0x300000),
+    ],
+)
+def test_app_larger_than_ota_0_fails_before_esptool(
+    tmp_path: Path, product: str, slot_size: int
+) -> None:
+    fake = FakeEsptool()
+    app = _app(tmp_path, b"\xe9" + b"\x00" * slot_size)
+    with pytest.raises(FlasherError, match=f"ota_0 slot holds 0x{slot_size:X}"):
+        flash_solo(
+            SOLO_PROFILES[product],
+            _PORT,
+            _make_bundle(tmp_path / "b", _with_node_16mb()),
+            app=app,
+            enter_download_mode=_port_as_is,
+            runner=fake,
+        )
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("product", ["SOLO ODU Controller", "SOLO IDU Interaction"])
+def test_app_filling_the_node_ota_0_slot_is_written(tmp_path: Path, product: str) -> None:
+    fake = FakeEsptool()
+    app = _app(tmp_path, b"\xe9" + b"\x00" * (0x1C0000 - 1))
+    flash_solo(
+        SOLO_PROFILES[product],
+        _PORT,
+        _make_bundle(tmp_path / "b", _with_node_16mb()),
+        app=app,
+        enter_download_mode=_port_as_is,
+        runner=fake,
+    )
+    assert fake.flash[0x80000] == app.read_bytes()
 
 
 def test_non_esp_app_fails_before_esptool(tmp_path: Path) -> None:

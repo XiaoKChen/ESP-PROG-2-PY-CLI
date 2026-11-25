@@ -130,7 +130,7 @@ the current screen and selection. The next key runs one and closes the popup;
 | `p` | pick the board's own port | SOLO |
 | `b` | bundle source: a release tag (fetched with `gh`) or an unzipped bundle folder | SOLO |
 | `a` | optional app `.bin` for `ota_0` (SOLO); toggle the Embassy `0x8000` app address (RA4M1 app) | SOLO, RA4M1 app |
-| `m` | toggle migrate-from-stock (erase `0x10000`–`0x1FFFF` first) | SOLO |
+| `m` | toggle migrate-from-stock (erase `0x10000`–`0x1FFFF` first; always on for the Interaction) | SOLO |
 | `n` | provision the preset's cancfg, like `--provision-node` | SOLO |
 | `r` | read the board's config, like `--read-node-config` | SOLO |
 | `g` | get Espressif's official (JTAG) probe image, saved beside the bundled build | ESP-Prog-2 |
@@ -377,6 +377,11 @@ board, a partition table per flash layout, `manifest.json`) plus the board's
 `cancfg`. `--port` is required and never auto-detected; see
 [Which port to pass](#which-port-to-pass).
 
+**3.5.0 needs the c-cpp-esp32-v1.4.0 release.** Its default bundle tag is
+`c-cpp-esp32-v1.4.0`; until that Embedded-CAN-Bootloaders release is
+published, the default fetch fails, so pass `--bundle-tag c-cpp-esp32-v1.3.0`
+(ODU and IDU only) or `--bundle` with an unzipped bundle.
+
 `cancfg` (`0x11000`, 4 KB) holds the 80-byte v2 device config block (name and
 CAN ID pair), then at `+0x50` a **board-profile record**, then `0xFF`. Older
 readers only read the first 80 bytes. If the record is missing or invalid, the
@@ -410,9 +415,19 @@ write v2 only over a valid v2 record already on the board, and v1 otherwise.
 `node-16MB` first ships in **c-cpp-esp32-v1.4.0** (the default bundle), which
 keeps `node-4MB` and `idu-16MB`. Its first 4 MB match `node-4MB` (NVS
 `0x9000`, otadata `0xE000`, `cancfg` `0x11000`, updater at `0x20000`, 1.75 MB
-`ota_0`/`ota_1` at `0x80000`/`0x240000`); an `assets` data partition fills
-`0x400000` to the end of flash. An older bundle has no `node-16MB`, so
-`--flash-solo interaction` refuses it before writing anything.
+`ota_0`/`ota_1` at `0x80000`/`0x240000`). Above that:
+
+| Partition | Type | Offset | Size |
+|---|---|---|---|
+| `assets` | data, `0x82` | `0x400000` | `0xBF0000` (11.9 MB) |
+| `coredump` | data, coredump | `0xFF0000` | `0x10000` (64 KB) |
+
+An older bundle has no `node-16MB`, so `--flash-solo interaction` refuses it
+before writing anything.
+
+`--app` must fit the layout's `ota_0` slot: `0x1C0000` (1.75 MB, the CAN node
+image cap) on node-4MB and node-16MB, `0x300000` (3 MB) on idu-16MB. A larger
+image is refused before anything is written.
 
 What each preset holds and writes at boot:
 
@@ -440,20 +455,30 @@ uv run esp-prog2-flasher --flash-solo --port COM7 --bundle bundle/
 ```
 
 The Interaction board ships on the stock Arduino-ESP32 layout and bootloader
-(`default_16MB.csv`), so its first install migrates it to the shared updater:
+(`default_16MB.csv`), so its first install migrates it to the shared updater.
+The `interaction` preset therefore **always** erases the stock leftovers;
+`--migrate-stock` (or the TUI's `m`) is not needed:
 
 ```sh
-uv run esp-prog2-flasher --flash-solo interaction --port COM9 --migrate-stock --app firmware.bin
+uv run esp-prog2-flasher --flash-solo interaction --port COM9 --app firmware.bin
 ```
 
+Always erasing is simpler than detecting a stock table at `0x8000`, and it is
+idempotent: the erased `0x10000..0x1FFFF` holds only `phy_init`, `cancfg` and
+`bootcnt`; the same run rewrites `cancfg` and leaves `bootcnt` blank, as on a
+fresh install. Re-running the preset on a provisioned Interaction board is
+therefore safe (it also clears a tripped boot counter).
+
 Its NVS (`0x9000`, 20 KB) sits where the stock layout has it, so saved settings
-survive. The stock app's leftovers in `0x10000..0x1FFFF` (where `phy_init`,
-`cancfg` and `bootcnt` now live) are erased; the rest of the old app is
-overwritten or left in the unused `ota_1` and `assets` space.
+survive. The rest of the old app is overwritten or left in the unused `ota_1`
+and `assets` space. **`assets` is not erased:** after a migration it holds stale
+stock data (old app code and the stock SPIFFS/FAT region), not a valid
+filesystem, so the first user of `assets` must format it before mounting it.
 
 Flash sequence, each step one esptool run:
 
-1. With `--migrate-stock`: erase `0x10000..0x1FFFF`.
+1. With `--migrate-stock`, and always for `interaction` (node-16MB): erase
+   `0x10000..0x1FFFF`.
 2. One `write-flash --flash-mode dio --flash-freq 80m --flash-size <layout>`:
    bootloader at `0x0`, the layout's partition table at `0x8000`, blank
    otadata at `0xE000`, the CAN updater at the layout's `factory` offset

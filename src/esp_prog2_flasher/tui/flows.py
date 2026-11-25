@@ -828,7 +828,7 @@ def summary(job: Job) -> Confirm:
                     else "none — the board boots the CAN updater",
                 ),
             ]
-            if job.migrate_stock:
+            if job.migrate_stock or profile.always_migrates_stock:
                 rows.append(("Erase first", f"{_migration_range()} (stock leftovers)"))
             record, label = _solo_record(profile, _solo_record_version(job.bundle_dir, job.tag))
             rows += _solo_config_rows(profile, job.manufacturer, record, label)
@@ -948,7 +948,8 @@ def target_fields(target: Target, settings: Settings, probe_firmware: Path | Non
             else settings.solo_tag
         )
         app = Path(settings.solo_app).name if settings.solo_app else "none"
-        migrate = "on" if settings.solo_migrate else "off"
+        # A layout that always migrates shows "on" whatever the toggle says (23-cell values).
+        migrate = "on" if settings.solo_migrate or profile.always_migrates_stock else "off"
         holds = _holds_text(record)
         if version == PROFILE_VERSION_V1 and record != profile.record:
             holds += f" (v2 needs ≥ {_V2_MINIMUM})"

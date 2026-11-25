@@ -119,7 +119,8 @@ BITRATE_LABELS: Final[dict[Bitrate, str]] = {
 
 
 # Flash layouts the release bundle carries; each name maps to the chip's flash size.
-# node-16MB (c-cpp-esp32-v1.4.0+) is node-4MB's first 4 MB plus an assets partition.
+# node-16MB (c-cpp-esp32-v1.4.0+) is node-4MB's first 4 MB plus an assets partition
+# (0x400000, 0xBF0000) and a coredump partition (0xFF0000, 0x10000).
 LayoutName = Literal["node-4MB", "node-16MB", "idu-16MB"]
 FlashSize = Literal["4MB", "16MB"]
 LAYOUT_FLASH_SIZES: Final[dict[LayoutName, FlashSize]] = {
@@ -127,6 +128,17 @@ LAYOUT_FLASH_SIZES: Final[dict[LayoutName, FlashSize]] = {
     "node-16MB": "16MB",
     "idu-16MB": "16MB",
 }
+# Size of each layout's ota_0 slot, the largest app --app may write there: 1.75 MiB on the
+# node layouts (the CAN node image cap), 3 MiB on idu-16MB.
+LAYOUT_APP_SLOT_SIZES: Final[dict[LayoutName, int]] = {
+    "node-4MB": 0x1C0000,
+    "node-16MB": 0x1C0000,
+    "idu-16MB": 0x300000,
+}
+# Layouts whose boards ship on the stock Arduino-ESP32 layout (the IDU Interaction board),
+# so every install erases the stock leftovers without --migrate-stock. The erased range only
+# holds phy_init, cancfg and bootcnt, and cancfg is rewritten in the same run.
+STOCK_MIGRATION_LAYOUTS: Final[frozenset[LayoutName]] = frozenset({"node-16MB"})
 
 
 class BoardProfileError(Exception):
@@ -200,6 +212,15 @@ class BoardProfile:
     @property
     def flash_size(self) -> FlashSize:
         return LAYOUT_FLASH_SIZES[self.layout]
+
+    @property
+    def app_slot_size(self) -> int:
+        return LAYOUT_APP_SLOT_SIZES[self.layout]
+
+    @property
+    def always_migrates_stock(self) -> bool:
+        """Whether every install erases the stock leftovers, with or without --migrate-stock."""
+        return self.layout in STOCK_MIGRATION_LAYOUTS
 
     @property
     def boot_ids(self) -> tuple[int, int]:
